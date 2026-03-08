@@ -15,6 +15,7 @@ import GlobalSearch from './GlobalSearch';
 import SplashScreen from './SplashScreen';
 import PolicyManager from './PolicyManager';
 import { useAppContext } from '../context/AppContext';
+import UploadResultModal from './UploadResultModal';
 
 // Error Boundary para proteger las pestañas
 class TabErrorBoundary extends Component {
@@ -113,6 +114,81 @@ const Layout = () => {
         }
     };
 
+    const [smartUpload, setSmartUpload] = useState({ loading: false, progress: 0, status: '' });
+    const [uploadResult, setUploadResult] = useState({ isOpen: false, status: '', message: '', details: [] });
+    const fileInputRef = React.useRef(null);
+
+    const handleSmartFileChange = async (e) => {
+        const selectedFiles = Array.from(e.target.files);
+        if (selectedFiles.length === 0) return;
+
+        setSmartUpload({ loading: true, progress: 0, status: `Iniciando (${selectedFiles.length} archivos)...` });
+
+        let successCount = 0;
+        let errorCount = 0;
+        let resultDetails = [];
+
+        try {
+            const { handleUnifiedSmartUpload } = context;
+
+            for (let i = 0; i < selectedFiles.length; i++) {
+                const file = selectedFiles[i];
+                const fileNum = i + 1;
+
+                try {
+                    await handleUnifiedSmartUpload(file, (msg, prog) => {
+                        setSmartUpload(prev => ({
+                            ...prev,
+                            status: `[${fileNum}/${selectedFiles.length}] ${file.name}: ${msg}`,
+                            progress: Math.round(((i / selectedFiles.length) * 100) + (prog / selectedFiles.length))
+                        }));
+                    });
+                    successCount++;
+                    resultDetails.push(`✅ ${file.name}: Procesado correctamente.`);
+                } catch (err) {
+                    console.error(`Error procesando archivo ${file.name}:`, err);
+                    errorCount++;
+                    resultDetails.push(`❌ ${file.name}: Error - ${err.message}`);
+                }
+            }
+
+            setSmartUpload({ loading: false, progress: 100, status: '' });
+
+            if (successCount > 0 && errorCount === 0) {
+                setUploadResult({
+                    isOpen: true,
+                    status: 'success',
+                    message: `¡${successCount} archivo(s) procesado(s) exitosamente!`,
+                    details: resultDetails
+                });
+            } else if (successCount > 0 && errorCount > 0) {
+                setUploadResult({
+                    isOpen: true,
+                    status: 'partial',
+                    message: `Carga parcial: ${successCount} exitos, ${errorCount} errores.`,
+                    details: resultDetails
+                });
+            } else {
+                setUploadResult({
+                    isOpen: true,
+                    status: 'error',
+                    message: 'No se pudo procesar ningún archivo.',
+                    details: resultDetails
+                });
+            }
+        } catch (err) {
+            console.error("Smart Upload Batch Failed:", err);
+            setSmartUpload({ loading: false, progress: 0, status: '' });
+            setUploadResult({
+                isOpen: true,
+                status: 'error',
+                message: 'Fallo crítico en el sistema.',
+                details: [`Error: ${err.message}`]
+            });
+        }
+        e.target.value = '';
+    };
+
     return (
         <div className="flex min-h-screen bg-[var(--bg-color)] text-[var(--text-color)] font-sans selection:bg-indigo-500/30">
             <SplashScreen loading={loading} />
@@ -122,6 +198,50 @@ const Layout = () => {
                 <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-500/10 blur-[60px] rounded-full" />
                 <div className="absolute top-[20%] right-[10%] w-[20%] h-[20%] bg-emerald-500/5 blur-[40px] rounded-full" />
             </div>
+
+            {/* Overlay de Carga Inteligente */}
+            <AnimatePresence>
+                {smartUpload.loading && (
+                    <motion.div
+                        initial={{ opacity: 0, y: -20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -20 }}
+                        className="fixed top-24 left-1/2 -translate-x-1/2 z-[100] w-full max-w-md px-4"
+                    >
+                        <div className="bg-zinc-900/90 backdrop-blur-2xl border border-indigo-500/30 rounded-3xl p-6 shadow-2xl shadow-indigo-500/20">
+                            <div className="flex items-center justify-between mb-4">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-8 h-8 rounded-xl bg-indigo-500/20 flex items-center justify-center text-indigo-400 animate-pulse">
+                                        <Database size={16} />
+                                    </div>
+                                    <span className="text-[10px] font-black uppercase tracking-widest text-white">IA Maestra Activa</span>
+                                </div>
+                                <span className="text-[10px] font-mono text-indigo-400 font-bold">{smartUpload.progress}%</span>
+                            </div>
+                            <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden mb-3">
+                                <motion.div
+                                    className="h-full bg-gradient-to-r from-indigo-500 to-purple-600"
+                                    initial={{ width: 0 }}
+                                    animate={{ width: `${smartUpload.progress}%` }}
+                                />
+                            </div>
+                            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500 text-center animate-pulse italic">
+                                {smartUpload.status}
+                            </p>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Hidden Input */}
+            <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleSmartFileChange}
+                className="hidden"
+                accept="application/pdf,image/*"
+                multiple
+            />
 
             {/* Global Search Component */}
             <GlobalSearch
@@ -288,9 +408,17 @@ const Layout = () => {
             <main className={`flex-1 min-w-0 transition-all duration-500 ${isSidebarExpanded ? 'md:ml-64' : 'ml-0 md:ml-20'} min-h-screen relative z-10 bg-[var(--bg-color)] text-[var(--text-color)]`} onClick={() => setShowNotifications(false)}>
                 <TabErrorBoundary>
                     {/* Modern Header */}
-                    <header className={`h-14 md:h-20 flex items-center justify-between px-4 md:px-10 sticky top-0 z-40 transition-all duration-500 border-b ${scrolled ? 'bg-[var(--bg-color)]/80 backdrop-blur-2xl border-[var(--border-color)] shadow-2xl' : 'bg-transparent border-transparent'
-                        }`}>
-                        <div className="flex items-center gap-6">
+                    <header className={`h-14 md:h-20 flex items-center justify-between px-4 md:px-10 sticky top-0 z-40 transition-all duration-500 border-b ${scrolled ? 'bg-[var(--bg-color)]/80 backdrop-blur-2xl border-[var(--border-color)] shadow-2xl' : 'bg-transparent border-transparent'}`}>
+                        <div className="flex items-center gap-4 md:gap-6">
+                            <div
+                                onClick={() => fileInputRef.current?.click()}
+                                className="flex items-center gap-3 px-4 md:px-6 py-2.5 bg-gradient-to-r from-indigo-500 to-purple-600 rounded-2xl text-white cursor-pointer hover:scale-105 transition-all shadow-lg shadow-indigo-500/20 group"
+                            >
+                                <PlusCircle size={16} className="group-hover:rotate-90 transition-transform duration-500" />
+                                <span className="text-[10px] font-black uppercase tracking-[0.2em] hidden md:inline">Subir Archivo IA</span>
+                                <span className="text-[10px] font-black uppercase md:hidden">IA</span>
+                            </div>
+
                             <div
                                 onClick={(e) => {
                                     e.stopPropagation();

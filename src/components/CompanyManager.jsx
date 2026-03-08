@@ -76,7 +76,7 @@ const CompanyManager = () => {
         if (!name) return '';
         const upper = name.toUpperCase().trim();
         if (upper.includes('ACS COMERCIAL') || upper.includes('GALICIA') || upper.includes('1276')) return 'GALICIA';
-        if (upper.includes('MERCANTIL ANDINA') || upper.includes('MERCANTIL')) return 'MERCANTIL';
+        if (upper.includes('MERCANTIL') || upper.includes('MERCANTIN')) return 'MERCANTIL';
         if (upper.includes('FEDERA')) return 'FEDERACION';
         if (upper.includes('ALLIANZ')) return 'ALLIANZ';
         if ((upper.includes('SWISS MEDICAL') && upper.includes('ART')) || upper.includes('SWISS MEDICAL ART')) return 'SWISS MEDICAL ART';
@@ -91,51 +91,101 @@ const CompanyManager = () => {
         if (upper.includes('HAMBURGO')) return 'HAMBURGO';
         if (upper.includes('INTEGRITY')) return 'INTEGRITY';
         if (upper.includes('TRIUNFO')) return 'TRIUNFO';
-        return upper.replace(/\s*(S\.?A\.?|SEGUROS|CIA\.?|COMPAÑIA|ARGENTINA)\s*/gi, '').trim();
+        if (upper.includes('EXPERTA ART')) return 'EXPERTA ART';
+        if (upper.includes('EXPERTA')) return 'EXPERTA';
+        return upper
+            .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Quitar acentos
+            .replace(/\s*(S\.?A\.?|SEGUROS|CIA\.?|COMPAÑIA|COMPANIA|ARGENTINA)\s*/gi, '')
+            .trim();
     }, []);
 
     // Inyectar estado de facturación real basado en historial (con aliases)
     const companiesWithStatus = React.useMemo(() => {
         const combined = [...invoices];
 
-        // 1. Agrupar facturas por nombre CANÓNICO (alias-aware)
-        const invoiceGroups = new Map();
+        // 1. Agrupar facturas por CUIT y por nombre
+        const invoiceGroupsByCuit = new Map();
+        const invoiceGroupsByName = new Map();
+
         combined.forEach(inv => {
+            const rawCuit = inv.cuit ? inv.cuit.replace(/[^0-9]/g, '') : '';
+            if (rawCuit) {
+                if (!invoiceGroupsByCuit.has(rawCuit)) invoiceGroupsByCuit.set(rawCuit, []);
+                invoiceGroupsByCuit.get(rawCuit).push(inv);
+            }
+
             const canonName = getCanonicalCompanyName(inv.company);
             const normName = inv._normalizedName;
-            // Guardar bajo ambas keys para máxima cobertura
-            if (!invoiceGroups.has(canonName)) invoiceGroups.set(canonName, []);
-            invoiceGroups.get(canonName).push(inv);
+
+            if (canonName) {
+                if (!invoiceGroupsByName.has(canonName)) invoiceGroupsByName.set(canonName, []);
+                invoiceGroupsByName.get(canonName).push(inv);
+            }
             if (normName && normName !== canonName) {
-                if (!invoiceGroups.has(normName)) invoiceGroups.set(normName, []);
-                invoiceGroups.get(normName).push(inv);
+                if (!invoiceGroupsByName.has(normName)) invoiceGroupsByName.set(normName, []);
+                invoiceGroupsByName.get(normName).push(inv);
             }
         });
 
-        // 2. Procesar cada compañía buscando por AMBOS keys
+        // 2. Procesar cada compañía dando prioridad al CUIT
         return companies.map(comp => {
+            const compCuit = comp.cuit ? comp.cuit.replace(/[^0-9]/g, '') : '';
             const canonKey = getCanonicalCompanyName(comp.name);
             const normKey = comp._normalizedName;
 
-            // Buscar en ambas keys y unificar resultados
-            const historyByCanon = invoiceGroups.get(canonKey) || [];
-            const historyByNorm = invoiceGroups.get(normKey) || [];
+            const historyByCuit = compCuit ? (invoiceGroupsByCuit.get(compCuit) || []) : [];
+            const historyByCanon = invoiceGroupsByName.get(canonKey) || [];
+            const historyByNorm = invoiceGroupsByName.get(normKey) || [];
 
-            // Deduplicar
+            // Deduplicar con validación estricta de CUIT para evitar mezclas homónimas
             const seen = new Set();
             const history = [];
-            [...historyByCanon, ...historyByNorm].forEach(inv => {
+
+            const addIfValid = (inv) => {
                 const key = inv.id || (inv.number + inv.date);
                 if (!seen.has(key)) {
+                    // CUIT STRICT CHECK: Ignorar si AMBOS tienen CUIT y NO coinciden.
+                    // Esto permite que empresas sin CUIT cargado igualmente absorban facturas por nombre.
+                    const invCuit = inv.cuit ? inv.cuit.replace(/[^0-9]/g, '') : '';
+                    if (compCuit && invCuit && compCuit !== invCuit) {
+                        return; // Evita que Experta ART absorba a Experta Seguros o viceversa
+                    }
                     seen.add(key);
                     history.push(inv);
                 }
-            });
+            };
+
+            // Agregamos primero por CUIT (máxima certeza), luego por nombre. Las repeticiones se saltean.
+            historyByCuit.forEach(addIfValid);
+            historyByCanon.forEach(addIfValid);
+            historyByNorm.forEach(addIfValid);
 
             // Filtrar SOLO facturas del mes actual
             const thisMonthInvoices = history.filter(inv => {
-                const d = new Date(inv._timestamp);
-                return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+                let dMonth = -1;
+                let dYear = -1;
+
+                if (inv.date) {
+                    if (inv.date.includes('/')) {
+                        const parts = inv.date.split('/');
+                        dMonth = parseInt(parts[1], 10) - 1;
+                        dYear = parseInt(parts[2], 10);
+                    } else if (inv.date.includes('-')) {
+                        const parts = inv.date.split('-');
+                        dYear = parseInt(parts[0], 10);
+                        dMonth = parseInt(parts[1], 10) - 1;
+                    }
+                } else if (inv.timestamp?.seconds) {
+                    const d = new Date(inv.timestamp.seconds * 1000);
+                    dMonth = d.getMonth();
+                    dYear = d.getFullYear();
+                } else if (inv.timestamp) {
+                    const d = new Date(inv.timestamp);
+                    dMonth = d.getMonth();
+                    dYear = d.getFullYear();
+                }
+
+                return dMonth === currentMonth && dYear === currentYear;
             });
 
             const isLoaded = thisMonthInvoices.length > 0;
@@ -178,13 +228,18 @@ const CompanyManager = () => {
                 // 1. PRIORIDAD MÁXIMA: Pendientes arriba (isLoaded: false -> -1)
                 if (a.isLoaded !== b.isLoaded) return a.isLoaded ? 1 : -1;
 
-                // 2. Si son Realizadas (isLoaded: true), ordenar por MAYOR a MENOR número de factura
+                // 2. Si son Realizadas (isLoaded: true), ordenar por MAYOR a MENOR (Monto y luego Nro Factura)
                 if (a.isLoaded) {
-                    const diff = b.maxInvoiceNumber - a.maxInvoiceNumber;
-                    if (diff !== 0) return diff;
+                    // Primero por monto total liquidado
+                    const amountDiff = (b.totalAmount || 0) - (a.totalAmount || 0);
+                    if (Math.abs(amountDiff) > 0.01) return amountDiff;
+
+                    // Segundo por número de factura más alto
+                    const numDiff = (b.maxInvoiceNumber || 0) - (a.maxInvoiceNumber || 0);
+                    if (numDiff !== 0) return numDiff;
                 }
 
-                // 3. Fallback: Orden alfabético por denominación (nombre)
+                // 3. Fallback: Orden alfabético
                 return a.name.localeCompare(b.name);
             });
     }, [companiesWithStatus, searchTerm, onlyPending, policies]);

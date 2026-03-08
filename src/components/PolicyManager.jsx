@@ -11,6 +11,7 @@ import { saveFileChunks, loadFileChunks, isChunkedAttachment } from '../utils/fi
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import UploadResultModal from './UploadResultModal';
 
 const RAMOS = [
     'Autos',
@@ -67,8 +68,12 @@ const PolicyManager = () => {
     const [progress, setProgress] = useState({ message: '', percent: 0 });
     const [selectedIds, setSelectedIds] = useState([]);
     const [currentPage, setCurrentPage] = useState(1);
+    const [cancellationReason, setCancellationReason] = useState('');
     const [auditResults, setAuditResults] = useState(null);
     const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
+
+    const [uploadResult, setUploadResult] = useState({ isOpen: false, status: '', message: '', details: [] });
+
     const ITEMS_PER_PAGE = 20;
 
     // --- Control de Anchos Dinámicos ---
@@ -1124,10 +1129,20 @@ const PolicyManager = () => {
                 await saveFileChunks(editingPolicy.id, rawBase64, file.name, file.type || 'application/pdf');
             }
 
-            alert("Archivo guardado!");
+            setUploadResult({
+                isOpen: true,
+                status: 'success',
+                message: '¡Archivo y datos guardados!',
+                details: [`✅ ${file.name}: Guardado correctamente en la póliza.`]
+            });
         } catch (error) {
             console.error("Upload error:", error);
-            alert(`Error: ${error.message}`);
+            setUploadResult({
+                isOpen: true,
+                status: 'error',
+                message: 'Error al actualizar el archivo.',
+                details: [`❌ Error: ${error.message}`]
+            });
         } finally {
             setIsSaving(false);
             if (e.target) e.target.value = '';

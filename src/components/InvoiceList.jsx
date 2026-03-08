@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useAppContext } from '../context/AppContext';
-import { Search, Filter, Download, Trash2, FileText, ChevronRight, ChevronDown, Upload, Folder, Sparkles, Loader2, CheckCircle2, Wrench, Pencil, X, Check, CalendarDays } from 'lucide-react';
+import { Search, Filter, Download, Trash2, FileText, ChevronRight, ChevronDown, Folder, Sparkles, Loader2, CheckCircle2, Wrench, Pencil, X, Check, CalendarDays, ArrowUpDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const InvoiceList = () => {
@@ -13,6 +13,7 @@ const InvoiceList = () => {
     const [displayLimit, setDisplayLimit] = useState(50);
     const [processLog, setProcessLog] = useState([]);
     const [expandedMonths, setExpandedMonths] = useState({});
+    const [sortBy, setSortBy] = useState('amount'); // 'amount' | 'number'
 
     // Deduplicación en tiempo real para el usuario
     const deduplicated = useMemo(() => {
@@ -37,17 +38,32 @@ const InvoiceList = () => {
                 (inv.number || '').includes(searchTerm)
             )
             .sort((a, b) => {
-                // Mayor a menor por Punto de Venta
-                const posA = parseInt(a.pointOfSale) || 0;
-                const posB = parseInt(b.pointOfSale) || 0;
-                if (posB !== posA) return posB - posA;
+                if (sortBy === 'amount') {
+                    // Mayor a menor por Importe
+                    const amtA = Number(a.amount) || 0;
+                    const amtB = Number(b.amount) || 0;
+                    if (Math.abs(amtB - amtA) > 0.01) return amtB - amtA;
 
-                // Mayor a menor por Número dentro del mismo Punto de Venta
-                const numA = parseInt(a.number) || 0;
-                const numB = parseInt(b.number) || 0;
-                return numB - numA;
+                    // Fallback a Punto de Venta/Número
+                    const posA = parseInt(a.pointOfSale) || 0;
+                    const posB = parseInt(b.pointOfSale) || 0;
+                    if (posB !== posA) return posB - posA;
+
+                    const numA = parseInt(a.number) || 0;
+                    const numB = parseInt(b.number) || 0;
+                    return numB - numA;
+                } else {
+                    // Mayor a menor por Punto de Venta luego Número
+                    const posA = parseInt(a.pointOfSale) || 0;
+                    const posB = parseInt(b.pointOfSale) || 0;
+                    if (posB !== posA) return posB - posA;
+
+                    const numA = parseInt(a.number) || 0;
+                    const numB = parseInt(b.number) || 0;
+                    return numB - numA;
+                }
             });
-    }, [deduplicated, searchTerm]);
+    }, [deduplicated, searchTerm, sortBy]);
 
     const handleEdit = (inv) => {
         setEditingInvoice(inv);
@@ -295,6 +311,14 @@ const InvoiceList = () => {
 
                 <div className="flex items-center gap-3">
                     <button
+                        onClick={() => setSortBy(prev => prev === 'amount' ? 'number' : 'amount')}
+                        className="px-6 py-3 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-white rounded-2xl transition-all flex items-center gap-3 font-black text-xs uppercase tracking-widest active:scale-95 shadow-xl"
+                        title="Cambiar modo de ordenamiento"
+                    >
+                        <ArrowUpDown size={18} className={sortBy === 'amount' ? 'text-emerald-400' : 'text-indigo-400'} />
+                        {sortBy === 'amount' ? 'ORDEN: $ IMPORTE' : 'ORDEN: NRO FACTURA'}
+                    </button>
+                    <button
                         onClick={syncDownloads}
                         disabled={isProcessing}
                         className={`bg-indigo-600 hover:bg-indigo-500 text-white font-black px-10 py-3 rounded-2xl transition-all shadow-xl shadow-indigo-500/20 flex items-center gap-3 text-xs uppercase tracking-widest ${isProcessing ? 'opacity-50 cursor-not-allowed' : ''}`}
@@ -362,7 +386,7 @@ const InvoiceList = () => {
                                             <div className="flex flex-col">
                                                 <span className="text-indigo-400 text-[10px] font-black uppercase tracking-widest mb-1">Factura C</span>
                                                 <span className="text-zinc-400 font-mono text-xs tracking-tighter group-hover:text-zinc-200 transition-colors">
-                                                    {(inv.pointOfSale || '00001').toString().padStart(5, '0')}-{(inv.number || '0').toString().padStart(8, '0')}
+                                                    {(inv.number || '0').toString().padStart(8, '0')}
                                                 </span>
                                             </div>
                                         </td>

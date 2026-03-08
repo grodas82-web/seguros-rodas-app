@@ -16,7 +16,6 @@ const InvoiceEntry = ({ onFinish }) => {
         date: new Date().toISOString().split('T')[0]
     });
     const [isSaving, setIsSaving] = useState(false);
-    const [isAnalyzing, setIsAnalyzing] = useState(false);
 
     // Auto-CUIT Lookup
     useEffect(() => {
@@ -26,33 +25,6 @@ const InvoiceEntry = ({ onFinish }) => {
         }
     }, [formData.company, companies]);
 
-    const handleFileUpload = async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-
-        setIsAnalyzing(true);
-        const reader = new FileReader();
-        reader.onload = async (event) => {
-            try {
-                const base64 = event.target.result;
-                const result = await analyzeInvoice(base64);
-
-                // Map Gemini results to form
-                setFormData(prev => ({
-                    ...prev,
-                    ...result,
-                    type: 'Factura C', // Forzar Factura C
-                    pointOfSale: result.pointOfSale?.toString().padStart(5, '0') || prev.pointOfSale,
-                    number: result.number?.toString().padStart(8, '0') || prev.number
-                }));
-            } catch {
-                alert("No se pudo analizar la factura. Por favor, ingresa los datos a mano.");
-            } finally {
-                setIsAnalyzing(false);
-            }
-        };
-        reader.readAsDataURL(file);
-    };
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -72,17 +44,6 @@ const InvoiceEntry = ({ onFinish }) => {
     return (
         <div className="max-w-2xl mx-auto animate-in slide-in-from-bottom duration-500">
             <div className="bg-[#18181b] border border-zinc-800 rounded-3xl p-10 shadow-2xl relative overflow-hidden">
-                {/* AI Loading Overlay */}
-                {isAnalyzing && (
-                    <div className="absolute inset-0 bg-black/60 backdrop-blur-md z-20 flex flex-col items-center justify-center text-center p-8">
-                        <div className="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-6"></div>
-                        <h4 className="text-xl font-black text-white italic flex items-center gap-2">
-                            <Sparkles className="text-indigo-400 animate-pulse" />
-                            GEMINI ESTÁ LEYENDO...
-                        </h4>
-                        <p className="text-zinc-400 text-sm mt-2 max-w-xs">Analizando imagen para extraer datos automáticamente.</p>
-                    </div>
-                )}
 
                 <div className="flex justify-between items-start mb-8">
                     <h3 className="text-2xl font-black text-white flex items-center gap-3">
@@ -91,23 +52,6 @@ const InvoiceEntry = ({ onFinish }) => {
                         </div>
                         Nueva Factura
                     </h3>
-
-                    {/* Botón de IA */}
-                    <input
-                        type="file"
-                        ref={fileInputRef}
-                        onChange={handleFileUpload}
-                        className="hidden"
-                        accept="image/*,application/pdf"
-                    />
-                    <button
-                        onClick={() => fileInputRef.current.click()}
-                        className="bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-600/20 rounded-2xl px-5 py-2.5 transition-all flex items-center gap-2 text-xs font-black uppercase tracking-widest group"
-                    >
-                        <Upload size={16} className="group-hover:-translate-y-1 transition-transform" />
-                        Subir Factura (IA)
-                        <Sparkles size={14} className="ml-1" />
-                    </button>
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-6">

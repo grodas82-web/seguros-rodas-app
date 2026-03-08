@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { db, storage, auth } from '../firebase/config';
-import { analyzeInvoice, analyzePolicy } from '../services/aiManager'; // Import added for multi-key failover
+import { analyzeInvoice, analyzePolicy, analyzeCSV, smartAnalyzeFile } from '../services/aiManager';
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import { collection, addDoc, onSnapshot, query, orderBy, deleteDoc, doc, updateDoc, writeBatch, serverTimestamp, getDocs, setDoc, where } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
@@ -20,6 +20,7 @@ export const AppProvider = ({ children }) => {
     const [globalSearchTerm, setGlobalSearchTerm] = useState('');
     const [showOnlyMissingFiles, setShowOnlyMissingFiles] = useState(false);
     const [user, setUser] = useState(null);
+    const [patterns, setPatterns] = useState({}); // { companyName: hints }
     const [theme, setTheme] = useState(() => {
         const saved = localStorage.getItem('theme');
         return saved || 'dark';
@@ -177,10 +178,26 @@ export const AppProvider = ({ children }) => {
             })));
         }, (err) => console.error("AppContext: Error in policies listener:", err));
 
+        // Escuchar Patrones de Cartera (Inteligencia de Extracción)
+        const unsubPatterns = onSnapshot(collection(db, 'extraction_patterns'), (snapshot) => {
+            const pMap = {};
+            snapshot.forEach(doc => {
+                pMap[doc.id.toLowerCase()] = doc.data().hints || "";
+            });
+            setPatterns(pMap);
+        });
+
         const unsubAuth = onAuthStateChanged(auth, (firebaseUser) => {
-            setUser(firebaseUser);
-            if (!firebaseUser) {
+            const isAdminBypass = localStorage.getItem('admin_bypass') === 'true';
+            if (isAdminBypass) {
+                // Si estamos en bypass, no dejamos que Firebase nos desloguee
+                setUser({ email: 'grodas@jylbrokers.com.ar', uid: 'admin_bypass', displayName: 'Gustavo Rodas' });
                 setLoading(false);
+            } else {
+                setUser(firebaseUser);
+                if (!firebaseUser) {
+                    setLoading(false);
+                }
             }
         });
 
@@ -190,11 +207,25 @@ export const AppProvider = ({ children }) => {
             unsubTest();
             unsubComp();
             unsubPol();
+            unsubPatterns();
         };
     }, [parseDate, normalizeName]);
 
-    const login = (email, password) => signInWithEmailAndPassword(auth, email, password);
-    const logout = () => signOut(auth);
+    const login = async (email, password) => {
+        // [ADMIN BYPASS] Soporte para credenciales críticas si Firebase falla
+        if (email === 'grodas@jylbrokers.com.ar' && password === 'Milo110619') {
+            console.warn("🔐 Admin Bypass Activated");
+            const fakeUser = { email, uid: 'admin_bypass', displayName: 'Gustavo Rodas' };
+            setUser(fakeUser);
+            localStorage.setItem('admin_bypass', 'true');
+            return fakeUser;
+        }
+        return signInWithEmailAndPassword(auth, email, password);
+    };
+    const logout = () => {
+        localStorage.removeItem('admin_bypass');
+        return signOut(auth);
+    };
 
     const checkDuplicate = (newInvoice, targetList = invoices) => {
         return targetList.some(inv => {
@@ -674,53 +705,114 @@ export const AppProvider = ({ children }) => {
     };
 
     const analyzePolicyWithAI = async (base64Data) => {
-        try {
-            const aiResult = await analyzePolicy(base64Data);
-            trackGeminiCall('Subir Poliza IA', aiResult.usageMetadata || {});
-            return aiResult.data;
-        } catch (err) {
-            console.error("Error en analyzePolicyWithAI (Gemini Helper):", err);
-            throw new Error(`[IA Falló] No se pudo analizar la póliza. Último error: ${err.message}`);
-        }
+        const result = await analyzePolicy(base64Data);
+        trackGeminiCall('Re-Analisis IA', result.usageMetadata || {});
+        return result.data;
     };
 
-    const processPolicyFile = async (file, onProgress) => {
+    // --- NUEVA LÓGICA CENTRALIZADA DE SUBIDA IA ---
+
+    /**
+     * Procesa cualquier archivo mediante IA de forma genérica
+     * @param {File} file - El archivo del input
+     * @param {'policy'|'invoice'|'csv'} targetType - Qué se espera extraer
+     */
+    const processFileWithAI = async (file, targetType, onProgress) => {
         try {
             if (onProgress) onProgress('Leyendo archivo...', 10);
 
-            const reader = new FileReader();
-            const base64Data = await new Promise((resolve, reject) => {
-                reader.onload = () => resolve(reader.result.split(',')[1]);
-                reader.onerror = () => reject(new Error('Error al leer archivo.'));
-                reader.readAsDataURL(file);
-            });
+            const isText = targetType === 'csv';
+            let fileContent;
+
+            if (isText) {
+                fileContent = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.onerror = reject;
+                    reader.readAsText(file);
+                });
+            } else {
+                fileContent = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result.split(',')[1]);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(file);
+                });
+            }
 
             if (onProgress) onProgress('Analizando con IA...', 40);
-            const parsed = await analyzePolicyWithAI(base64Data);
 
-            if (onProgress) onProgress('Preparando datos...', 80);
+            let result;
+            if (targetType === 'policy') {
+                // Inteligencia J&L: Buscar patrones para esta carga
+                const fileNameNorm = normalizeName(file.name || '');
+                let hints = "";
+                for (const [compKey, patternHints] of Object.entries(patterns)) {
+                    if (fileNameNorm.includes(compKey)) {
+                        hints = patternHints;
+                        console.log(`🧠 Usando patrón de extracción para: ${compKey}`);
+                        break;
+                    }
+                }
+                result = await analyzePolicy(fileContent, hints);
+            } else if (targetType === 'invoice') result = await analyzeInvoice(fileContent);
+            else if (targetType === 'csv') result = await analyzeCSV(fileContent);
 
-            const policyData = {
-                ...parsed,
-                attachments: [{
-                    chunked: true,
-                    name: file.name,
-                    type: file.type || 'application/pdf',
-                    size: file.size,
-                    timestamp: new Date().toISOString()
-                }],
-                _pendingFileBase64: base64Data,
-                _pendingFileType: file.type || 'application/pdf',
+            if (onProgress) onProgress('Procesamiento completado', 100);
+
+            return {
+                status: 'success',
+                data: result.data,
+                usage: result.usageMetadata,
+                fileBase64: !isText ? fileContent : null,
                 fileName: file.name,
-                timestamp: new Date()
+                fileType: file.type
             };
-
-            if (onProgress) onProgress('Archivo listo!', 100);
-            return { status: 'success', data: policyData };
-
         } catch (error) {
-            console.error('Error procesando poliza:', error);
+            console.error("Error en processFileWithAI:", error);
             return { status: 'error', error: error.message };
+        }
+    };
+
+    /**
+     * Guarda una póliza analizada con lógica de Smart Merge y Chunks
+     */
+    const savePolicyResult = async (policyData, fileInfo) => {
+        const { fileBase64, fileName, fileType } = fileInfo;
+
+        // Smart Merge Logic
+        const q = query(collection(db, 'policies'), where('policyNumber', '==', policyData.policyNumber?.toString().trim()));
+        const snap = await getDocs(q);
+
+        const attachment = {
+            chunked: true,
+            name: fileName,
+            type: fileType || 'application/pdf',
+            timestamp: new Date().toISOString()
+        };
+
+        if (!snap.empty) {
+            const existingDoc = snap.docs[0];
+            const existingData = existingDoc.data();
+            const mergedAttachments = [...(existingData.attachments || []), attachment];
+
+            await updateDoc(existingDoc.ref, {
+                ...policyData,
+                attachments: mergedAttachments,
+                updatedAt: serverTimestamp()
+            });
+
+            if (fileBase64) await saveFileChunks(existingDoc.id, fileBase64, fileName, fileType);
+            return { status: 'merged', id: existingDoc.id };
+        } else {
+            const newDoc = await addDoc(collection(db, 'policies'), {
+                ...policyData,
+                attachments: [attachment],
+                createdAt: serverTimestamp()
+            });
+
+            if (fileBase64) await saveFileChunks(newDoc.id, fileBase64, fileName, fileType);
+            return { status: 'created', id: newDoc.id };
         }
     };
 
@@ -770,6 +862,119 @@ export const AppProvider = ({ children }) => {
         } catch (error) {
             console.error("Error procesando CSV con IA:", error);
             return { status: 'error', error: error.message };
+        }
+    };
+
+    /**
+     * Lógica MAESTRA J&L: Clasificación automática y guardado inteligente
+     */
+    const handleUnifiedSmartUpload = async (file, onProgress) => {
+        try {
+            if (onProgress) onProgress('Leyendo archivo...', 10);
+            const reader = new FileReader();
+            const base64Content = await new Promise((resolve, reject) => {
+                reader.onload = (e) => resolve(e.target.result.split(',')[1]);
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+
+            if (onProgress) onProgress('Clasificando con IA Maestra...', 30);
+            const result = await smartAnalyzeFile(base64Content);
+            const { documentType, extractedData } = result.data;
+
+            if (documentType === 'POLIZA') {
+                if (onProgress) onProgress('Guardando Póliza...', 70);
+                await savePolicyResult(extractedData, {
+                    fileBase64: base64Content,
+                    fileName: file.name,
+                    fileType: file.type
+                });
+
+                // Limpieza de notificaciones de este cliente
+                if (extractedData.clientName) {
+                    try {
+                        const noticesRef = collection(db, 'notifications');
+                        const q = query(noticesRef, where('clientName', '==', extractedData.clientName), where('status', '!=', 'completada'));
+                        const snap = await getDocs(q);
+                        const batch = writeBatch(db);
+                        snap.forEach(d => batch.update(d.ref, { status: 'completada', color: 'green' }));
+                        await batch.commit();
+                    } catch (e) {
+                        console.warn("No se pudieron limpiar notificaciones:", e);
+                    }
+                }
+            } else if (documentType === 'FACTURA') {
+                if (onProgress) onProgress('Procesando Factura...', 60);
+
+                const gross = parseFloat(extractedData.amount) || 0;
+                const net = gross * 0.955; // IIBB 4.5%
+                const normalizedCuit = (extractedData.cuit || '').toString().replace(/[-\s]/g, '').trim();
+
+                const invoiceData = {
+                    ...extractedData,
+                    cuit: normalizedCuit,
+                    amount: gross,
+                    netAmount: net,
+                    status: 'Realizada',
+                    date: new Date().toISOString().split('T')[0],
+                    timestamp: new Date()
+                };
+
+                // Duplicados en History
+                const isDup = invoices.some(inv => inv.number === invoiceData.number && inv.cuit === invoiceData.cuit);
+                if (isDup) throw new Error(`La factura ${invoiceData.number} ya existe en el historial.`);
+
+                await addDoc(collection(db, 'invoices'), invoiceData);
+
+                // Actualizar Compañía → "Facturado" (Check Verde)
+                // Buscamos coincidencia por CUIT o por Nombre si el CUIT falla
+                let compMatch = companies.find(c => (c.cuit || '').toString().replace(/[-\s]/g, '') === normalizedCuit);
+
+                if (!compMatch && extractedData.company) {
+                    const normName = normalizeName(extractedData.company);
+                    compMatch = companies.find(c => normalizeName(c.name) === normName);
+                }
+
+                if (compMatch) {
+                    await updateDoc(doc(db, 'companies', compMatch.id), {
+                        status: 'Facturado',
+                        lastInvoice: invoiceData.number,
+                        updatedAt: serverTimestamp()
+                    });
+
+                    // Limpieza de notificaciones de esta empresa (Bell Bell)
+                    try {
+                        const noticesRef = collection(db, 'notifications');
+                        const normName = compMatch.name;
+                        const q = query(noticesRef, where('companyName', '==', normName), where('status', '!=', 'completada'));
+                        const snap = await getDocs(q);
+                        const batch = writeBatch(db);
+                        snap.forEach(d => batch.update(d.ref, { status: 'completada', color: 'green' }));
+                        await batch.commit();
+                    } catch (e) {
+                        console.warn("No se pudieron limpiar notificaciones de empresa:", e);
+                    }
+
+                    console.log(`✅ Empresa ${compMatch.name} marcada como Facturada.`);
+                } else {
+                    console.warn(`⚠️ No se encontró empresa para CUIT ${normalizedCuit} o nombre ${extractedData.company}.`);
+                }
+            }
+
+            if (onProgress) onProgress('¡Carga completada con éxito!', 100);
+
+            // Registrar consumo de tokens
+            if (result.usageMetadata) {
+                trackGeminiCall('Carga Unificada IA', {
+                    ...result.usageMetadata,
+                    fileName: file.name
+                });
+            }
+
+            return { status: 'success', type: documentType };
+        } catch (error) {
+            console.error("Smart Upload Error:", error);
+            throw error;
         }
     };
 
@@ -1317,6 +1522,22 @@ export const AppProvider = ({ children }) => {
         };
     }, [invoices, testInvoices, companies, policies]);
 
+    const saveExtractionPattern = async (companyName, hints) => {
+        if (!companyName || !hints) return;
+        try {
+            const id = normalizeName(companyName);
+            if (!id) return;
+            await setDoc(doc(db, 'extraction_patterns', id), {
+                hints,
+                updatedAt: serverTimestamp(),
+                companyName: companyName.trim()
+            }, { merge: true });
+            console.log(`✅ Patrón guardado para ${companyName}`);
+        } catch (e) {
+            console.warn("Error guardando patrón:", e);
+        }
+    };
+
     return (
         <AppContext.Provider value={{
             invoices,
@@ -1353,8 +1574,9 @@ export const AppProvider = ({ children }) => {
             unifyExistingPolicies,
             mergeClientsByName,
             bulkAddPolicies,
-            processInvoiceFile,
-            processPolicyFile,
+            processFileWithAI,
+            savePolicyResult,
+            handleUnifiedSmartUpload,
             processCSVWithAI,
             analyzePolicyWithAI,
             standardizeExistingData,
@@ -1373,7 +1595,9 @@ export const AppProvider = ({ children }) => {
             logout,
             theme,
             toggleTheme,
-            getGeminiUsage
+            getGeminiUsage,
+            patterns,
+            saveExtractionPattern
         }}>
             {children}
         </AppContext.Provider>
