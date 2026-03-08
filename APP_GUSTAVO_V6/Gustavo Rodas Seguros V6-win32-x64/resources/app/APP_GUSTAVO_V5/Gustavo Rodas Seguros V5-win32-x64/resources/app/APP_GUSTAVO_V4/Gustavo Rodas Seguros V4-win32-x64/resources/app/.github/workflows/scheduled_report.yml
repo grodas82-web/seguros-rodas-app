@@ -1,0 +1,29 @@
+name: Scheduled Insurance Report
+
+on:
+  schedule:
+    # 14:59 UTC es 11:59 ART (Argentina tiene UTC-3)
+    - cron: '59 14 * * 1,5'
+  workflow_dispatch: # Permite ejecutarlo manualmente desde GitHub
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install jspdf jspdf-autotable nodemailer firebase dotenv
+
+      - name: Run Report Script
+        env:
+          VITE_GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+        run: node scheduled_report.cjs

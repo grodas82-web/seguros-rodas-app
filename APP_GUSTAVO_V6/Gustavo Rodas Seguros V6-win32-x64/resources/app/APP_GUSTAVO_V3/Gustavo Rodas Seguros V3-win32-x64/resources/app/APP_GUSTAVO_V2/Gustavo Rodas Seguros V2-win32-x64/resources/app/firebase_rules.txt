@@ -1,0 +1,36 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Función para verificar si el usuario está autenticado
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Regla global: solo el dueño de la cuenta puede ver y editar sus datos
+    // Nota: Por ahora, como es de uso personal, permitimos acceso total si está logueado.
+    // En una fase multi-usuario, usaríamos: request.auth.uid == resource.data.userId
+    
+    match /invoices/{invoice} {
+      allow read, write: if isAuthenticated();
+    }
+    
+    match /test_invoices/{invoice} {
+      allow read, write: if isAuthenticated();
+    }
+    
+    match /companies/{company} {
+      allow read, write: if isAuthenticated();
+    }
+    
+    match /policies/{policy} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Storage Rules (Se configurarían en el Storage)
+    // match /policies/{allPaths=**} {
+    //   allow read, write: if request.auth != null;
+    // }
+  }
+}

@@ -1,0 +1,17 @@
+{
+    "name": "Finanzas T&G - JYL Brokers",
+    "short_name": "Finanzas T&G",
+    "description": "Sistema de Gestión de Seguros y Facturación",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0c0c0e",
+    "theme_color": "#6366f1",
+    "icons": [
+        {
+            "src": "icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any maskable"
+        }
+    ]
+}

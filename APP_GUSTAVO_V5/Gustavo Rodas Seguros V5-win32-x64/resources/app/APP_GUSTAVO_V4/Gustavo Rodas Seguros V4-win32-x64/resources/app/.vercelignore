@@ -1,0 +1,22 @@
+node_modules
+release*
+.git
+scripts
+release-builds
+*.exe
+*.zip
+*.msi
+*.dmg
+dist-electron
+temp
+tmp
+log
+*.log
+despliegue_log.txt
+Facturas en APP
+public/manuals
+*.ps1
+build_output.txt
+audit_report.txt
+reparacion_log.txt
+smg_error_debug.png

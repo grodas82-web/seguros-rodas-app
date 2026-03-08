@@ -1,0 +1,122 @@
+﻿{
+    "companies":  [
+                      {
+                          "cuit":  "30500031960",
+                          "name":  "SMG SEGUROS",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "33686262869",
+                          "name":  "SMG ART",
+                          "ivaType":  "Sujeto Exento"
+                      },
+                      {
+                          "cuit":  "30500000127",
+                          "name":  "SURA",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30686273330",
+                          "name":  "ASOCIART",
+                          "ivaType":  "Sujeto Exento"
+                      },
+                      {
+                          "cuit":  "30500051163",
+                          "name":  "MERIDIONAL",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30500037217",
+                          "name":  "ALLIANZ",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30500049770",
+                          "name":  "ZURICH",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30714590541",
+                          "name":  "EXPERTA SEGUROS",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30687156168",
+                          "name":  "EXPERTA ART",
+                          "ivaType":  "Sujeto Exento"
+                      },
+                      {
+                          "cuit":  "30500001115",
+                          "name":  "BOSTON",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "",
+                          "name":  "PROVINCIA SEGUROS",
+                          "ivaType":  ""
+                      },
+                      {
+                          "cuit":  "30688254090",
+                          "name":  "PROVINCIA ART",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30714182753",
+                          "name":  "RUEZE",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "33707366589",
+                          "name":  "FEDERACION PATRONAL",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30500036911",
+                          "name":  "MERCANTIL ANDINA",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30609160558",
+                          "name":  "Pizzi Seguros",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30500017011",
+                          "name":  "HDI",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30605659981",
+                          "name":  "AMCA",
+                          "ivaType":  "Sujeto Exento"
+                      },
+                      {
+                          "cuit":  "30685893076",
+                          "name":  "BERKLEY ART",
+                          "ivaType":  "Sujeto Exento"
+                      },
+                      {
+                          "cuit":  "30500007539",
+                          "name":  "MAPFRE GENERALES",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "30657048689",
+                          "name":  "PROMECOR",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "33700893729",
+                          "name":  "MAPFRE VIDA",
+                          "ivaType":  "Responsable Inscripto"
+                      },
+                      {
+                          "cuit":  "",
+                          "name":  "Andres Cirigliano",
+                          "ivaType":  "Responsable Inscripto"
+                      }
+                  ],
+    "invoices":  [
+
+                 ]
+}
