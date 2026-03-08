@@ -25,8 +25,8 @@ const DataMigrator = () => {
         reader.onload = async (evt) => {
             try {
                 // 1. Verificar configuración Firebase
-                if (db.app.options.apiKey === 'AIzaSy...') {
-                    throw new Error("FACTURACIÓN: Falta configurar el API Key de Firebase en config.js");
+                if (!db.app.options.apiKey) {
+                    throw new Error("FACTURACIÓN: Falta configurar el API Key de Firebase.");
                 }
 
                 const dataBody = new Uint8Array(evt.target.result);

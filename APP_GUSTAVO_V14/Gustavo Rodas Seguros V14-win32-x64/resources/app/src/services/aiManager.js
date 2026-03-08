@@ -60,34 +60,38 @@ const PROMPT_POLICY = (hints = "") => `
 Analiza esta Póliza de Seguros y extrae los siguientes datos en formato JSON puro:
 {
     "clientName": "Nombre completo del Asegurado / Tomador",
-        "dni": "DNI o CUIT del asegurado",
-            "policyNumber": "Número de póliza completo",
-                "company": "Nombre de la Compañía de Seguros",
-                    "riskType": "Ramo del seguro (Autos, Motos, Combinado Familiar, Integral de Comercio, RC, Vida, etc)",
-                        "startDate": "Fecha de inicio de vigencia (YYYY-MM-DD)",
-                            "endDate": "Fecha de fin de vigencia (YYYY-MM-DD)",
-                                "prima": número decimal de la prima total(neto),
-                                    "premio": número decimal del premio total(final con impuestos),
-                                        "insuredSum": número decimal de la suma asegurada principal,
-                                            "currency": "ARS" o "USD",
-                                                "riskDetails": {
+    "dni": "DNI o CUIT del asegurado",
+    "address": "Dirección completa (Domicilio, Localidad, Provincia)",
+    "policyNumber": "Número de póliza completo",
+    "company": "Nombre de la Compañía de Seguros",
+    "riskType": "Ramo del seguro (Autos, Motos, Combinado Familiar, Integral de Comercio, RC, Vida, ART, etc)",
+    "startDate": "Fecha de inicio de vigencia (YYYY-MM-DD)",
+    "endDate": "Fecha de fin de vigencia (YYYY-MM-DD)",
+    "prima": número decimal de la prima total (neto),
+    "premio": número decimal del premio total (final con impuestos),
+    "insuredSum": número decimal de la suma asegurada principal,
+    "currency": "ARS" o "USD",
+    "riskDetails": {
         "vehicle": {
             "brand": "Marca del vehículo",
-                "model": "Modelo del vehículo",
-                    "year": "Año/Modelo",
-                        "plate": "Patente / Dominio",
-                            "chassis": "Número de Chasis",
-                                "engine": "Número de Motor",
-                                    "coverage": "Nombre de la cobertura (ej: Terceros Completo, Todo Riesgo)",
-                                        "deductible": número decimal de la franquicia(si aplica)
+            "model": "Modelo del vehículo",
+            "year": "Año/Modelo",
+            "plate": "Patente / Dominio",
+            "chassis": "Número de Chasis",
+            "engine": "Número de Motor",
+            "coverage": "Nombre de la cobertura (ej: Terceros Completo, Todo Riesgo)",
+            "deductible": número decimal de la franquicia (si aplica)
         },
+        "alicuota": número decimal de la alícuota/cuota variable (solo para ART, ej: 5.57),
         "coverages": [
             { "description": "Descripción de la cobertura (ej: Incendio Edificio)", "amount": número decimal }
         ]
     }
 }
 ${hints ? `PISTAS PARA ESTA COMPAÑÍA:\n${hints}\n` : ""}
-IMPORTANTE:
+REGLAS ESPECÍFICAS:
+- Direccion: Busca "Domicilio:", "Dirección de Cobro" o sección "Datos de contacto". Concatena Domicilio, Localidad y Provincia.
+- ART (Experta y otros): Busca "Cuota Variable:" o "Alícuota:". Extrae el valor numérico (ej: si dice 5,57% retorna 5.57).
 - Si es un Automotor / Moto, completa el objeto 'vehicle'.
 - Si es otro ramo, completa el array 'coverages' con las sumas aseguradas por ítem.
 No incluyas markdown, solo el JSON.
@@ -285,12 +289,14 @@ Analiza TODO el documento y clasifícalo. (Atención: los valores de Prima y Pre
 REGLAS DE EXTRACCIÓN PARA EXPERTA SEGUROS (Y PÓLIZAS EN GENERAL):
 - Cliente (OBLIGATORIO): Buscar junto a "ASEGURADO", "Tomador" o similar (ej: OLIVARES LAUTARO). Si no lo encuentras, usa el texto "CLIENTE DESCONOCIDO".
 - DNI (OBLIGATORIO): Debajo de "N° DOC./N° DE CUIT" o similar (ej: 32.421.862 o CUIT). Si no lo encuentras, usa el texto "00000000".
+- Dirección: Busca "Domicilio:", "Dirección de Cobro" o sección "Datos de contacto". Concatena Domicilio, Localidad y Provincia (ej: SARMIENTO Nro. 643 - CAPITAL FEDERAL).
 - Póliza (OBLIGATORIO): En columna "POLIZA N°" o "Póliza". Si no lo encuentras, usa el texto "SIN_NUMERO".
 - Compañía (OBLIGATORIO): Identifica la aseguradora por su nombre o logo. ¡Si dice EXPERTA SEGUROS, usa exactamente "EXPERTA SEGUROS"!
 - Vigencia: Extraer de "VIGENCIA desde las ... hasta las ...". Formato YYYY-MM-DD.
 - Vehículo: Extraer Chasis, Motor, Marca, Patente, Año de "OBJETO DEL SEGURO Y RIESGOS ASEGURADOS" (O seccion equivalente). ¡Debes llenar TODOS los campos de vehicle!
+- Alícuota (Solo ART): Busca "Cuota Variable:" o "Alícuota:". Extrae el valor numérico (ej: de "5,57%" extrae 5.57).
 - Prima y Premio: Buscar los totales en las páginas finales o donde aplique.
-- riskType: DEBE SER ESTRICTAMENTE "Autos" si es un seguro de automotores (sin importar si dice Automotor o Vehículos).
+- riskType: DEBE SER ESTRICTAMENTE "Autos" si es un seguro de automotores. "ART" si es Riesgos del Trabajo.
 
 REGLAS DE EXTRACCIÓN PARA FACTURAS/LIQUIDACIONES (AFIP STRICT):
 - cuit: Busca "CUIT: " seguido de 11 números en el recuadro "Apellido y Nombre / Razón Social" en la MITAD del documento. (Jamás el de arriba).
@@ -307,32 +313,34 @@ REGLAS DE EXTRACCIÓN PARA FACTURAS/LIQUIDACIONES (AFIP STRICT):
 {
     "documentType": "POLIZA" o "FACTURA",
     "confidence": 95,
-    "extractedData": {
-        "clientName": "string",
-        "dni": "string",
-        "policyNumber": "string",
-        "company": "string",
-        "riskType": "string",
-        "prima": 0,
-        "premio": 0,
-        "insuredSum": 0,
-        "startDate": "YYYY-MM-DD",
-        "endDate": "YYYY-MM-DD",
-        "riskDetails": {
-            "vehicle": {
-                "brand": "string",
-                "model": "string",
-                "plate": "string",
-                "chassis": "string",
-                "engine": "string",
-                "year": "string",
-                "coverage": "string",
-                "deductible": 0
+        "extractedData": {
+            "clientName": "string",
+            "dni": "string",
+            "address": "string",
+            "policyNumber": "string",
+            "company": "string",
+            "riskType": "string",
+            "prima": 0,
+            "premio": 0,
+            "insuredSum": 0,
+            "startDate": "YYYY-MM-DD",
+            "endDate": "YYYY-MM-DD",
+            "riskDetails": {
+                "vehicle": {
+                    "brand": "string",
+                    "model": "string",
+                    "plate": "string",
+                    "chassis": "string",
+                    "engine": "string",
+                    "year": "string",
+                    "coverage": "string",
+                    "deductible": 0
+                },
+                "alicuota": 0,
+                "coverages": [
+                    { "description": "string", "amount": 0 }
+                ]
             },
-            "coverages": [
-                { "description": "string", "amount": 0 }
-            ]
-        },
         "number": "string",
         "type": "string",
         "date": "YYYY-MM-DD",
