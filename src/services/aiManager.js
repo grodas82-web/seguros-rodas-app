@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 
 // === POOL DE API KEYS GEMINI (failover automático) ===
 const API_KEYS = [
-    import.meta.env.VITE_GEMINI_API_KEY
+    import.meta.env.VITE_GEMINI_API_KEY,
+    import.meta.env.VITE_FIREBASE_API_KEY  // Backup key as they are usually the same project
 ].filter(k => k && k.trim()); // Filtrar keys vacías/undefined
 
 let currentKeyIndex = 0;
@@ -104,76 +105,88 @@ async function _callClaude(prompt, fileBase64) {
 
     const base64Data = fileBase64.includes(',') ? fileBase64.split(",")[1] : fileBase64;
 
-    const models = ["claude-3-5-sonnet-20241022", "claude-3-5-sonnet-latest"];
-    let lastError = null;
-
-    for (const model of models) {
-        try {
-            console.log(`📡[PROBANDO CLAUDE] Intentando Modelo: ${model}`);
-            const response = await fetch("https://api.anthropic.com/v1/messages", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "x-api-key": claudeKey,
-                    "anthropic-version": "2023-06-01",
-                    "anthropic-dangerous-direct-browser-access": "true"
-                },
-                body: JSON.stringify({
-                    model: model,
-                    max_tokens: 1024,
-                    messages: [
-                        {
-                            role: "user",
-                            content: [
-                                {
-                                    type: "document",
-                                    source: {
-                                        type: "base64",
-                                        media_type: "application/pdf",
-                                        data: base64Data
-                                    }
-                                },
-                                {
-                                    type: "text",
-                                    text: prompt
+    const model = "claude-3-5-sonnet-latest"; // Actualizado a la versión más reciente para evitar 404
+    try {
+        console.log(`📡[PROBANDO CLAUDE] Key: ${claudeKey.slice(0, 8)}... | Modelo: ${model}`);
+        const response = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-api-key": claudeKey,
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "pdfs-2024-09-25",
+                "anthropic-dangerous-direct-browser-access": "true"
+            },
+            body: JSON.stringify({
+                model: model,
+                max_tokens: 1024,
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            {
+                                type: "document",
+                                source: {
+                                    type: "base64",
+                                    media_type: "application/pdf",
+                                    data: base64Data
                                 }
-                            ]
-                        }
-                    ]
-                })
-            });
+                            },
+                            {
+                                type: "text",
+                                text: prompt
+                            }
+                        ]
+                    }
+                ]
+            })
+        });
 
-            if (response.status !== 200) {
-                const errorBody = await response.json();
-                console.error(`❌ [ANTHROPIC ERROR - ${model}]:`, errorBody);
-                lastError = new Error(`Claude Error(${response.status}): ${JSON.stringify(errorBody)}`);
-                continue; // Probar siguiente modelo
-            }
+        if (response.status !== 200) {
+            const errorBody = await response.json();
+            console.error(`❌ [ANTHROPIC ERROR - ${model}]:`, errorBody);
 
-            const data = await response.json();
-            const text = data.content[0].text;
-            console.log("📝 [CLAUDE RAW]:", text);
+            let detailedMsg = `Claude Error(${response.status}): ${errorBody.error?.message || JSON.stringify(errorBody)}`;
+            if (response.status === 401) detailedMsg = "❌ Error 401: Autenticación Fallida. Revisa tu API Key en los settings.";
+            if (response.status === 400) detailedMsg = "❌ Error 400: Error de Formato en la petición.";
+            if (response.status === 404) detailedMsg = `❌ Error 404: El modelo ${model} no está disponible para esta API Key.`;
 
-            // Extracción ROBUSTA de JSON
-            const jsonText = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1) || text;
-            const parsedData = JSON.parse(jsonText.replace(/```json|```/g, "").trim());
-
-            return {
-                data: parsedData,
-                usageMetadata: {
-                    promptTokens: data.usage.input_tokens || 0,
-                    candidateTokens: data.usage.output_tokens || 0,
-                    totalTokens: data.usage.input_tokens + data.usage.output_tokens,
-                    modelUsed: model,
-                    engine: 'Claude'
-                }
-            };
-        } catch (err) {
-            lastError = err;
-            console.warn(`⚠️ Error con modelo ${model}: ${err.message}`);
+            throw new Error(detailedMsg);
         }
+
+        const data = await response.json();
+        const text = data.content[0].text;
+        console.log("📝 [CLAUDE RAW]:", text);
+
+        // Extracción ROBUSTA de JSON (v3)
+        let jsonText = text;
+        const startIndex = text.indexOf('{');
+        const endIndex = text.lastIndexOf('}');
+        if (startIndex !== -1 && endIndex !== -1) {
+            jsonText = text.substring(startIndex, endIndex + 1);
+        }
+
+        // Limpiar posibles bloques de código markdown
+        const cleanJson = jsonText.replace(/```json|```/g, "").trim();
+        const parsedData = JSON.parse(cleanJson);
+
+        const inputTokens = data.usage?.input_tokens || 0;
+        const outputTokens = data.usage?.output_tokens || 0;
+
+        return {
+            data: parsedData,
+            usageMetadata: {
+                promptTokens: inputTokens,
+                candidateTokens: outputTokens,
+                totalTokens: inputTokens + outputTokens,
+                modelUsed: model,
+                engine: 'Claude'
+            }
+        };
+    } catch (err) {
+        console.error(`❌ [ANTHROPIC FATAL ERROR]: ${err.message}`);
+        throw err;
     }
-    throw lastError;
 }
 
 // Helper para llamadas a Gemini con Failover (Fallback)
@@ -187,8 +200,6 @@ async function _callGemini(prompt, fileBase64) {
     let lastError = null;
 
     const MODELS = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
         "gemini-flash-latest"
     ];
 
@@ -210,9 +221,16 @@ async function _callGemini(prompt, fileBase64) {
                 const text = response.text();
                 console.log("📝 [GEMINI RAW]:", text);
 
-                // Extracción ROBUSTA de JSON
-                const jsonText = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1) || text;
-                const parsedData = JSON.parse(jsonText.replace(/```json|```/g, "").trim());
+                // Extracción ROBUSTA de JSON (v3)
+                let jsonText = text;
+                const startIndex = text.indexOf('{');
+                const endIndex = text.lastIndexOf('}');
+                if (startIndex !== -1 && endIndex !== -1) {
+                    jsonText = text.substring(startIndex, endIndex + 1);
+                }
+
+                const cleanJson = jsonText.replace(/```json|```/g, "").trim();
+                const parsedData = JSON.parse(cleanJson);
 
                 const um = response.usageMetadata || {};
                 return {
@@ -242,19 +260,24 @@ async function _callGemini(prompt, fileBase64) {
     throw lastError || new Error("Gemini falló en todos los intentos");
 }
 
-// Master Helper que orquesta el Dual-Engine
+// Master Helper que orquesta el Dual-Engine - ACTUALIZADO: SOLO CLAUDE (BYOK)
 async function _callAI(prompt, fileBase64) {
+    // Intentar primero con Claude (BYOK)
     try {
         const result = await _callClaude(prompt, fileBase64);
-        console.log("✅ Claude (Primario) OK");
+        console.log("✅ Claude (BYOK) OK");
         return result;
     } catch (claudeError) {
-        console.warn(`⚠️ Claude falló: ${claudeError.message}. Iniciando Fallback Gemini...`);
+        console.warn(`⚠️ Claude BYOK falló: ${claudeError.message}. Intentando fallback a Gemini...`);
+
+        // Fallback automático a Gemini si Claude falla (técnica Dual-Engine)
         try {
-            return await _callGemini(prompt, fileBase64);
+            const geminiResult = await _callGemini(prompt, fileBase64);
+            console.log("✅ Gemini Fallback OK");
+            return geminiResult;
         } catch (geminiError) {
-            console.error("❌ Falló el procesamiento total (Claude + Gemini)");
-            throw new Error(`Error en IA: Claude(${claudeError.message}) | Gemini(${geminiError.message})`);
+            console.error(`❌ Error total en IA (Claude + Gemini): ${geminiError.message}`);
+            throw new Error(`Error en Procesamiento AI: ${claudeError.message} | Gemini: ${geminiError.message}`);
         }
     }
 }

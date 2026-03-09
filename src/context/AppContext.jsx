@@ -578,8 +578,9 @@ export const AppProvider = ({ children }) => {
             if (stored.log.length > 100) stored.log = stored.log.slice(-100);
 
             localStorage.setItem('geminiUsage', JSON.stringify(stored));
-            console.log(`[Gemini] ${source} | Tokens: ${tt} (Key #${tokenMetrics.keyIndex || 1} - ${tokenMetrics.modelUsed || '?'})`);
-        } catch (e) { console.warn('Error guardando uso Gemini:', e); }
+            console.log(`📊 [TokenTracker] ${engine} | ${source} | Total: ${tt} (Prompt: ${pt}, Output: ${ct})`);
+            if (engine === 'Claude') console.log("🧡 Claude Token Saved:", tt);
+        } catch (e) { console.warn('Error guardando uso Gemini/Claude:', e); }
     };
 
     const getGeminiUsage = () => {
@@ -1019,14 +1020,25 @@ export const AppProvider = ({ children }) => {
                     period: 'FALLBACK'
                 };
             } else {
-                if (onProgress) onProgress('Clasificando con IA Maestra...', 30);
+                if (onProgress) onProgress('Analizando documento con sistema dual AI...', 30);
                 const companyNames = companies.map(c => c.name);
-                const result = await smartAnalyzeFile(base64Content, companyNames);
-                // Restauramos el acceso correcto a `.data` y protegemos ante la ausencia de extractedData
-                documentType = result.data?.documentType;
-                extractedData = result.data?.extractedData || {};
 
-                // Registrar consumo de tokens solo si vino de la IA
+                // Llamada a la IA (con fallback interno en aiManager.js)
+                const result = await smartAnalyzeFile(base64Content, companyNames);
+                console.log("📝 [SMART ANALYZE RESULT]:", result);
+
+                if (!result || !result.data) {
+                    throw new Error("La IA no pudo procesar el documento correctamente.");
+                }
+
+                documentType = result.data.documentType;
+                extractedData = result.data.extractedData || {};
+
+                if (!documentType) {
+                    throw new Error("No se pudo determinar el tipo de documento (Póliza o Factura).");
+                }
+
+                // Registrar consumo de tokens
                 if (result.usageMetadata) {
                     trackGeminiCall('Carga Unificada IA', {
                         ...result.usageMetadata,

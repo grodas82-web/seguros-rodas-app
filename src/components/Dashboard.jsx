@@ -79,29 +79,42 @@ const Dashboard = ({ onNavigate }) => {
         const chartRaw = Array(12).fill(null).map(() => ({ '2024': 0, '2025': 0, '2026': 0 }));
         const companySumsThisMonth = new Map();
         const companySumsLastMonth = new Map();
-        const loadedThisMonthSet = new Set();
+        const normalizeName = (n) => {
+            if (!n) return '';
+            return n.normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .toLowerCase()
+                .replace(/s\.a\.|sa|compia|compañía|cia\.| \/|seg\.|argentina|nacion|asoc\.|mutual|asociacin|asociacion|riesgos|trabajo|art|seguros|servicios/gi, '')
+                .replace(/\s+/g, '')
+                .replace(/[^a-z0-9]/g, '')
+                .trim();
+        };
 
-        // Alias helper for matching company names
         const getCanon = (name) => {
-            if (!name) return '';
+            if (!name) return null;
             const u = name.toUpperCase().trim();
-            if (u.includes('ACS COMERCIAL') || u.includes('GALICIA') || u.includes('1276')) return 'GALICIA';
-            if (u.includes('MERCANTIL ANDINA') || u.includes('MERCANTIL')) return 'MERCANTIL';
-            if (u.includes('FEDERA')) return 'FEDERACION';
-            if (u.includes('ALLIANZ')) return 'ALLIANZ';
-            if ((u.includes('SWISS MEDICAL') && u.includes('ART')) || u.includes('SWISS MEDICAL ART')) return 'SWISS MEDICAL ART';
-            if (u.includes('SMG') || (u.includes('COMPANIA ARGENTINA') && u.includes('SEGUROS')) || (u.includes('SWISS MEDICAL') && !u.includes('ART'))) return 'SMG';
-            if (u.includes('MERIDIONAL')) return 'MERIDIONAL';
-            if (u.includes('ZURICH')) return 'ZURICH';
-            if (u.includes('RIVADAVIA')) return 'RIVADAVIA';
-            if (u.includes('SANCOR')) return 'SANCOR';
-            if (u.includes('SAN CRISTOBAL') || u.includes('SAN CRIST\u00d3BAL')) return 'SAN CRISTOBAL';
-            if (u.includes('PROVINCIA')) return 'PROVINCIA';
-            if (u.includes('MAPFRE')) return 'MAPFRE';
-            if (u.includes('HAMBURGO')) return 'HAMBURGO';
-            if (u.includes('INTEGRITY')) return 'INTEGRITY';
-            if (u.includes('TRIUNFO')) return 'TRIUNFO';
-            return u.replace(/\s*(S\.?A\.?|SEGUROS|CIA\.?|COMPA\u00d1IA|ARGENTINA)\s*/gi, '').trim();
+            if (u.includes('ACS COMERCIAL') || u.includes('GALICIA') || u.includes('1276')) return '__CANON_GALICIA';
+            if (u.includes('MERCANTIL ANDINA') || u.includes('MERCANTIL')) return '__CANON_MERCANTIL';
+            if (u.includes('FEDERA')) return '__CANON_FEDERACION';
+            if (u.includes('ALLIANZ')) return '__CANON_ALLIANZ';
+            if ((u.includes('SWISS MEDICAL') && u.includes('ART')) || u.includes('SWISS MEDICAL ART')) return '__CANON_SWISS_MEDICAL_ART';
+            if (u.includes('SMG') || (u.includes('COMPANIA ARGENTINA') && u.includes('SEGUROS')) || (u.includes('SWISS MEDICAL') && !u.includes('ART'))) return '__CANON_SMG';
+            if (u.includes('MERIDIONAL')) return '__CANON_MERIDIONAL';
+            if (u.includes('ZURICH')) return '__CANON_ZURICH';
+            if (u.includes('RIVADAVIA')) return '__CANON_RIVADAVIA';
+            if (u.includes('SANCOR')) return '__CANON_SANCOR';
+            if (u.includes('SAN CRISTOBAL') || u.includes('SAN CRIST\u00d3BAL')) return '__CANON_SANCRISTOBAL';
+            if (u.includes('PROVINCIA')) return '__CANON_PROVINCIA';
+            if (u.includes('MAPFRE')) return '__CANON_MAPFRE';
+            if (u.includes('HAMBURGO')) return '__CANON_HAMBURGO';
+            if (u.includes('INTEGRITY')) return '__CANON_INTEGRITY';
+            if (u.includes('TRIUNFO')) return '__CANON_TRIUNFO';
+            if (u.includes('EXPERTA')) return '__CANON_EXPERTA';
+            if (u.includes('GALENO')) return '__CANON_GALENO';
+            if (u.includes('OMINT')) return '__CANON_OMINT';
+            if (u.includes('BERKLEY')) return '__CANON_BERKLEY';
+            if (u.includes('NOBLE')) return '__CANON_NOBLE';
+            return null;
         };
 
         // 2. Procesamiento Single-Pass O(N)
@@ -189,22 +202,24 @@ const Dashboard = ({ onNavigate }) => {
             companyReport: Array.from(activePolicies.reduce((acc, p) => {
                 let c = (p.company || 'OTRA').trim().toUpperCase();
 
-                // Normalización de nombres de compañías
-                if (c.includes('MERCANTIL ANDINA')) {
-                    c = 'MERCANTIL';
-                } else if (c.includes('FEDERA')) {
-                    c = 'FEDERACIÓN';
-                } else if (c.includes('ACS COMERCIAL') || c.includes('GALICIA') || c.includes('1276')) {
-                    c = 'GALICIA';
-                } else if (c.includes('ALLIANZ')) {
-                    c = 'ALLIANZ';
-                } else if (c.includes('SMG') || c.includes('SWISS MEDICAL') || c.includes('COMPANIA ARGENTINA DE SEGUROS') || c.includes('COMPAÑIA ARGENTINA DE SEGUROS')) {
-                    c = 'SMG SEGUROS';
-                } else if (c.includes('EXPERTA ART')) {
-                    c = 'EXPERTA ART';
-                } else if (c.includes('EXPERTA')) {
-                    c = 'EXPERTA SEGUROS';
-                }
+                // Normalización de nombres de compañías (Sincronizado con main.cjs)
+                if (c.includes('MERCANTIL ANDINA') || c.includes('MERCANTIL')) c = 'MERCANTIL';
+                else if (c.includes('FEDERA')) c = 'FEDERACIÓN';
+                else if (c.includes('ACS COMERCIAL') || c.includes('GALICIA') || c.includes('1276')) c = 'GALICIA';
+                else if (c.includes('ALLIANZ')) c = 'ALLIANZ';
+                else if ((c.includes('SWISS MEDICAL') && c.includes('ART')) || c.includes('SWISS MEDICAL ART')) c = 'SWISS MEDICAL ART';
+                else if (c.includes('SMG') || (c.includes('COMPANIA ARGENTINA') && c.includes('SEGUROS')) || (c.includes('SWISS MEDICAL') && !c.includes('ART'))) c = 'SMG';
+                else if (c.includes('MERIDIONAL')) c = 'MERIDIONAL';
+                else if (c.includes('ZURICH')) c = 'ZURICH';
+                else if (c.includes('RIVADAVIA')) c = 'RIVADAVIA';
+                else if (c.includes('SANCOR')) c = 'SANCOR';
+                else if (c.includes('SAN CRISTOBAL') || c.includes('SAN CRIST\u00d3BAL')) c = 'SAN CRISTOBAL';
+                else if (c.includes('PROVINCIA')) c = 'PROVINCIA';
+                else if (c.includes('MAPFRE')) c = 'MAPFRE';
+                else if (c.includes('HAMBURGO')) c = 'HAMBURGO';
+                else if (c.includes('INTEGRITY')) c = 'INTEGRITY';
+                else if (c.includes('TRIUNFO')) c = 'TRIUNFO';
+                else if (c.includes('EXPERTA')) c = 'EXPERTA';
 
                 const r = normalizeRisk(p.riskType);
                 if (!acc.has(c)) acc.set(c, { total: 0, branches: {} });
@@ -214,7 +229,32 @@ const Dashboard = ({ onNavigate }) => {
                 return acc;
             }, new Map()).entries())
                 .map(([name, data]) => ({ name, ...data }))
-                .sort((a, b) => b.total - a.total)
+                .sort((a, b) => b.total - a.total),
+
+            // Nueva lógica de alertas críticas (Sincronizado con Reporte Automático)
+            alerts: {
+                expiring: policies.filter(p => {
+                    if (!p.endDate || p.isCancelled || isAutoExpired(p)) return false;
+                    const end = new Date(p.endDate);
+                    const diffTime = end - new Date();
+                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                    return diffDays >= 0 && diffDays <= 7;
+                }).sort((a, b) => new Date(a.endDate) - new Date(b.endDate)),
+
+                pendingInvoices: companies.filter(comp => {
+                    // Usamos la misma lógica de coverage ya calculada arriba
+                    const hasInv = loadedThisMonthSet.has(comp._normalizedName) || loadedThisMonthSet.has(getCanon(comp.name));
+                    return !hasInv;
+                }),
+
+                missingFiles: policies.filter(p =>
+                    !p.isCancelled &&
+                    !p.fileUrl &&
+                    !p.fileBase64 &&
+                    !(p.attachments && p.attachments.length > 0) &&
+                    !isAutoExpired(p)
+                )
+            }
         };
     }, [uniqueInvoices, testInvoices, companies, policies, viewDate]);
 
@@ -757,6 +797,7 @@ const Dashboard = ({ onNavigate }) => {
                 </div>
 
                 {/* Columna 4: Balance Anual y Top Ranking */}
+                {/* Widgets de Alertas y Notificaciones (Columna Derecha) */}
                 <div className="flex flex-col gap-6">
                     <StatCard
                         title="Balance Neto Anual"
@@ -766,66 +807,100 @@ const Dashboard = ({ onNavigate }) => {
                         trend={stats.yearEvolution}
                         subtitle={`Vs Total 2025: $${stats.totalYear2025.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
                     />
-                    <div className="bg-[var(--card-bg)] border border-[var(--border-color)] backdrop-blur-3xl rounded-[2.5rem] p-6 flex-1 flex flex-col justify-start overflow-hidden min-h-[320px] shadow-[var(--card-shadow)]">
-                        <div className="flex justify-between items-start mb-6">
-                            <div className="p-3 rounded-xl bg-emerald-500/10 text-emerald-500">
-                                <FileText size={20} />
+
+                    {/* PANEL DE ALERTAS CRÍTICAS (Estilo Reporte Automático) */}
+                    <div className="bg-[var(--card-bg)] border border-[var(--border-color)] backdrop-blur-3xl rounded-[2.5rem] p-6 flex-1 flex flex-col gap-6 shadow-[var(--card-shadow)] overflow-hidden min-h-[500px]">
+                        <div className="flex justify-between items-center mb-2">
+                            <div>
+                                <h3 className="text-sm font-black text-indigo-500 uppercase tracking-[0.3em] mb-1">Alertas Críticas</h3>
+                                <p className="text-[10px] font-black text-[var(--text-secondary)] uppercase tracking-widest">Resumen de Gestión Pendiente</p>
                             </div>
-                            <div className="flex flex-col items-end gap-1">
-                                <span className="text-[10px] font-black text-[var(--text-color)] uppercase tracking-tighter">Cobertura {stats.monthName}</span>
-                                <div className="flex gap-2">
-                                    <span className="text-[9px] font-bold text-emerald-500">{stats.doneCompanies.length} Ok</span>
-                                    <span className="text-[9px] font-bold text-rose-500">{stats.missingCompanies.length} Pend</span>
-                                </div>
-                            </div>
+                            <button
+                                onClick={async () => {
+                                    try {
+                                        const res = await fetch('http://localhost:3002/api/test-report');
+                                        const data = await res.json();
+                                        if (data.success) alert("✅ Reporte de prueba enviado con éxito.");
+                                    } catch (e) { alert("❌ Error: Asegúrate de que la App de escritorio esté abierta."); }
+                                }}
+                                className="p-2.5 rounded-xl bg-indigo-500/10 text-indigo-500 hover:bg-indigo-500 hover:text-white transition-all border border-indigo-500/20 group"
+                                title="Probar Envío de Mail Ahora"
+                            >
+                                <Mail size={18} className="group-hover:scale-110 transition-transform" />
+                            </button>
                         </div>
 
-                        <div className="space-y-3 overflow-y-auto custom-scrollbar pr-2 max-h-[120px]">
-                            {stats.missingCompanies.length > 0 && (
-                                <div className="mb-4">
-                                    <p className="text-[9px] font-black text-rose-500/50 uppercase tracking-widest mb-2">Pendientes Factura</p>
-                                    {stats.missingCompanies.map((name, i) => (
-                                        <div key={i} className="flex items-center gap-2 mb-1.5">
-                                            <div className="w-1 h-1 rounded-full bg-rose-500 animate-pulse" />
-                                            <p className="text-[10px] text-[var(--text-color)] truncate uppercase font-bold">{name}</p>
-                                        </div>
-                                    ))}
+                        <div className="flex-1 space-y-8 overflow-y-auto custom-scrollbar pr-2">
+                            {/* 1. VENCIMIENTOS (Indigo) */}
+                            <div className="space-y-4">
+                                <div className="flex items-center justify-between border-b border-[var(--border-color)] pb-2">
+                                    <div className="flex items-center gap-2">
+                                        <Calendar size={14} className="text-indigo-500" />
+                                        <h4 className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Vencimientos (7 días)</h4>
+                                    </div>
+                                    <span className="text-[9px] font-black bg-indigo-500/10 text-indigo-500 px-2 py-0.5 rounded-full">{stats.alerts.expiring.length}</span>
                                 </div>
-                            )}
-                        </div>
-
-                        {/* Nuevo Widget de Vencimientos */}
-                        <div className="mt-4 pt-4 border-t border-[var(--border-color)] space-y-3">
-                            <div className="flex items-center gap-2 mb-2">
-                                <ShieldAlert size={14} className="text-amber-500" />
-                                <p className="text-[9px] font-black text-amber-500/50 uppercase tracking-widest">Vencimientos Próximos</p>
-                            </div>
-                            <div className="space-y-2 overflow-y-auto custom-scrollbar pr-2 max-h-[100px]">
-                                {expiringPolicies.length > 0 ? (
-                                    expiringPolicies.slice(0, 5).map((p, i) => {
+                                <div className="space-y-2">
+                                    {stats.alerts.expiring.length > 0 ? stats.alerts.expiring.slice(0, 5).map((p, i) => {
                                         const end = new Date(p.endDate);
                                         const diff = Math.ceil((end - new Date()) / (1000 * 60 * 60 * 24));
                                         return (
-                                            <div key={i} className="flex flex-col gap-0.5 p-2 rounded-xl bg-[var(--bg-color)] hover:bg-[var(--border-color)] transition-all border border-transparent hover:border-[var(--border-color)] shadow-sm">
-                                                <div className="flex justify-between items-center">
-                                                    <p className="text-[9px] text-[var(--text-color)] truncate uppercase font-black max-w-[120px]">{p.clientName}</p>
-                                                    <span className={`text-[8px] font-black uppercase ${diff < 7 ? 'text-rose-500' : 'text-amber-500'}`}>
-                                                        {diff === 0 ? 'HOY' : `en ${diff}d`}
-                                                    </span>
+                                            <div key={i} className="group/item flex items-center justify-between p-3 rounded-2xl bg-[var(--bg-color)] border border-[var(--border-color)] hover:border-indigo-500/30 transition-all cursor-pointer" onClick={() => onNavigate('clientes', p.clientName)}>
+                                                <div className="min-w-0">
+                                                    <p className="text-[10px] font-black text-[var(--text-color)] uppercase truncate">{p.clientName}</p>
+                                                    <p className="text-[8px] text-[var(--text-secondary)] font-bold uppercase truncate">{p.company} • {p.riskType}</p>
                                                 </div>
-                                                <p className="text-[7px] text-[var(--text-secondary)] font-bold uppercase tracking-widest">{p.company} • {p.riskType}</p>
+                                                <span className={`text-[9px] font-black px-2 py-1 rounded-lg ${diff < 3 ? 'bg-rose-500/10 text-rose-500' : 'bg-indigo-500/10 text-indigo-500'}`}>
+                                                    {diff === 0 ? 'HOY' : `${diff}d`}
+                                                </span>
                                             </div>
                                         );
-                                    })
-                                ) : (
-                                    <p className="text-[9px] text-[var(--text-secondary)] font-bold uppercase py-2">Sin vencimientos cercanos</p>
-                                )}
+                                    }) : <p className="text-[9px] text-[var(--text-secondary)] font-bold uppercase italic py-2">Sin vencimientos próximos</p>}
+                                </div>
+                            </div>
+
+                            {/* 2. PENDIENTES FACTURACIÓN (Amber) */}
+                            <div className="space-y-4">
+                                <div className="flex items-center justify-between border-b border-[var(--border-color)] pb-2">
+                                    <div className="flex items-center gap-2">
+                                        <DollarSign size={14} className="text-amber-500" />
+                                        <h4 className="text-[10px] font-black text-amber-500 uppercase tracking-widest">Pendientes de Factura</h4>
+                                    </div>
+                                    <span className="text-[9px] font-black bg-amber-500/10 text-amber-500 px-2 py-0.5 rounded-full">{stats.alerts.pendingInvoices.length}</span>
+                                </div>
+                                <div className="space-y-2">
+                                    {stats.alerts.pendingInvoices.length > 0 ? stats.alerts.pendingInvoices.slice(0, 6).map((comp, i) => (
+                                        <div key={i} className="flex items-center gap-3 p-2.5 rounded-2xl bg-amber-500/5 border border-amber-500/10">
+                                            <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                                            <p className="text-[10px] font-black text-[var(--text-color)] uppercase truncate">{comp.name}</p>
+                                        </div>
+                                    )) : <p className="text-[9px] text-emerald-500 font-black uppercase italic py-2">Facturación al día</p>}
+                                </div>
+                            </div>
+
+                            {/* 3. FALTA ARCHIVO PDF (Rose) */}
+                            <div className="space-y-4">
+                                <div className="flex items-center justify-between border-b border-[var(--border-color)] pb-2">
+                                    <div className="flex items-center gap-2">
+                                        <ShieldAlert size={14} className="text-rose-500" />
+                                        <h4 className="text-[10px] font-black text-rose-500 uppercase tracking-widest">Pólizas Sin PDF</h4>
+                                    </div>
+                                    <span className="text-[9px] font-black bg-rose-500/10 text-rose-500 px-2 py-0.5 rounded-full">{stats.alerts.missingFiles.length}</span>
+                                </div>
+                                <div className="space-y-2">
+                                    {stats.alerts.missingFiles.length > 0 ? stats.alerts.missingFiles.slice(0, 5).map((p, i) => (
+                                        <div key={i} className="p-2.5 rounded-2xl bg-rose-500/5 border border-rose-500/10 flex flex-col gap-0.5">
+                                            <p className="text-[9px] font-black text-[var(--text-color)] uppercase truncate">{p.clientName}</p>
+                                            <p className="text-[7px] text-rose-500/70 font-bold uppercase tracking-widest italic">Archivo faltante</p>
+                                        </div>
+                                    )) : <p className="text-[9px] text-emerald-500 font-black uppercase italic py-2">Documentación completa</p>}
+                                </div>
                             </div>
                         </div>
 
-                        <div className="mt-auto pt-4 border-t border-[var(--border-color)]">
-                            <p className="text-[8px] font-black text-[var(--text-secondary)] uppercase tracking-widest text-center">
-                                Gustavo Rodas <span className="italic">Seguros</span>
+                        <div className="mt-auto pt-4 border-t border-[var(--border-color)] text-center">
+                            <p className="text-[8px] font-black text-[var(--text-secondary)] uppercase tracking-[0.4em] opacity-30">
+                                Gustavo Rodas <span className="italic">Seguros</span> V15
                             </p>
                         </div>
                     </div>
@@ -834,26 +909,12 @@ const Dashboard = ({ onNavigate }) => {
 
             <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
 
-                {/* Gráfico de Evolución */}
-                <div className="lg:col-span-3 bg-[var(--card-bg)] border border-[var(--border-color)] backdrop-blur-3xl rounded-2xl md:rounded-[2.5rem] p-4 md:p-10 shadow-[var(--card-shadow)] relative overflow-hidden">
+                {/* Gráfico de Evolución Mensual Detallado */}
+                <div className="lg:col-span-4 bg-[var(--card-bg)] border border-[var(--border-color)] backdrop-blur-3xl rounded-2xl md:rounded-[2.5rem] p-4 md:p-10 shadow-[var(--card-shadow)] relative overflow-hidden">
                     <div className="flex justify-between items-center mb-12 relative z-10">
                         <div>
-                            <h3 className="font-black text-[var(--text-color)] uppercase text-sm tracking-[0.2em] mb-1">Evolución de Ingresos Comparativa</h3>
-                            <p className="text-[var(--text-secondary)] text-xs font-medium uppercase tracking-widest">Análisis Multianual • 2024 - 2026</p>
-                        </div>
-                        <div className="flex items-center gap-4 bg-[var(--bg-color)] p-2 rounded-2xl border border-[var(--border-color)] shadow-sm">
-                            <div className="flex items-center gap-2 px-3 py-1 bg-indigo-500/10 rounded-xl border border-indigo-500/20">
-                                <div className="w-2 h-2 rounded-full bg-indigo-500 shadow-[0_0_8px_#6366f1]" />
-                                <span className="text-[9px] font-black text-indigo-500 uppercase">2026</span>
-                            </div>
-                            <div className="flex items-center gap-2 px-3 py-1 bg-pink-500/5 rounded-xl border border-pink-500/10">
-                                <div className="w-2 h-2 rounded-full bg-pink-500 opacity-60" />
-                                <span className="text-[9px] font-black text-pink-500 uppercase">2025</span>
-                            </div>
-                            <div className="flex items-center gap-2 px-3 py-1 bg-amber-500/5 rounded-xl border border-amber-500/10">
-                                <div className="w-2 h-2 rounded-full bg-amber-500 opacity-60" />
-                                <span className="text-[9px] font-black text-amber-500 uppercase">2024</span>
-                            </div>
+                            <h3 className="font-black text-[var(--text-color)] uppercase text-sm tracking-[0.2em] mb-1">Cierre Mensual e IIBB</h3>
+                            <p className="text-[var(--text-secondary)] text-xs font-medium uppercase tracking-widest">Evolución de Comisiones Netas (post-deducciones)</p>
                         </div>
                     </div>
 
@@ -867,23 +928,8 @@ const Dashboard = ({ onNavigate }) => {
                                     </linearGradient>
                                 </defs>
                                 <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.05} vertical={false} />
-                                <XAxis
-                                    dataKey="name"
-                                    stroke="var(--text-secondary)"
-                                    fontSize={10}
-                                    tickLine={false}
-                                    axisLine={false}
-                                    dy={15}
-                                    style={{ fontWeight: 'black', opacity: 0.5 }}
-                                />
-                                <YAxis
-                                    stroke="#52525b"
-                                    fontSize={10}
-                                    tickLine={false}
-                                    axisLine={false}
-                                    tickFormatter={(value) => `$${value / 1000}k`}
-                                    style={{ fontWeight: 'black', opacity: 0.5 }}
-                                />
+                                <XAxis dataKey="name" stroke="var(--text-secondary)" fontSize={10} tickLine={false} axisLine={false} dy={15} style={{ fontWeight: 'black', opacity: 0.5 }} />
+                                <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(value) => `$${value / 1000}k`} style={{ fontWeight: 'black', opacity: 0.5 }} />
                                 <Tooltip
                                     cursor={{ stroke: '#6366f1', strokeWidth: 2, strokeDasharray: '5 5' }}
                                     content={({ active, payload, label }) => {
@@ -908,89 +954,10 @@ const Dashboard = ({ onNavigate }) => {
                                         return null;
                                     }}
                                 />
-                                <Area
-                                    type="monotone"
-                                    dataKey="2026"
-                                    stroke="#6366f1"
-                                    strokeWidth={4}
-                                    fillOpacity={1}
-                                    fill="url(#colorTotal)"
-                                    name="2026"
-                                    animationDuration={2000}
-                                />
-                                <Area
-                                    type="monotone"
-                                    dataKey="2025"
-                                    stroke="#ec4899"
-                                    strokeWidth={2}
-                                    strokeDasharray="8 8"
-                                    fillOpacity={0}
-                                    name="2025"
-                                    animationDuration={1500}
-                                />
-                                <Area
-                                    type="monotone"
-                                    dataKey="2024"
-                                    stroke="#fbbf24"
-                                    strokeWidth={1}
-                                    strokeDasharray="4 4"
-                                    fillOpacity={0}
-                                    name="2024"
-                                    animationDuration={1000}
-                                />
+                                <Area type="monotone" dataKey="2026" stroke="#6366f1" strokeWidth={4} fillOpacity={1} fill="url(#colorTotal)" name="2026" animationDuration={2000} />
+                                <Area type="monotone" dataKey="2025" stroke="#ec4899" strokeWidth={2} strokeDasharray="8 8" fillOpacity={0} name="2025" animationDuration={1500} />
                             </AreaChart>
                         </ResponsiveContainer>
-                    </div>
-                </div>
-
-                {/* Checklist de Cobertura */}
-                <div className="bg-[var(--card-bg)] border border-[var(--border-color)] backdrop-blur-3xl rounded-2xl md:rounded-[2.5rem] p-4 md:p-8 shadow-[var(--card-shadow)] flex flex-col relative overflow-hidden">
-                    <div className="flex justify-between items-center mb-10 relative z-10">
-                        <div>
-                            <h3 className="font-black text-[var(--text-color)] uppercase text-xs tracking-[0.2em] mb-1">Cobertura Mensual</h3>
-                            <p className="text-[var(--text-secondary)] text-[10px] font-black uppercase tracking-widest text-indigo-500">
-                                {viewDate.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })}
-                            </p>
-                        </div>
-                        <div className="flex gap-2">
-                            <button onClick={() => changeMonth(-1)} className="p-2 border border-[var(--border-color)] bg-[var(--bg-color)] hover:bg-[var(--border-color)] rounded-xl text-[var(--text-secondary)] transition-all">
-                                <ArrowDownRight className="rotate-135" size={16} />
-                            </button>
-                            <button onClick={() => changeMonth(1)} className="p-2 border border-[var(--border-color)] bg-[var(--bg-color)] hover:bg-[var(--border-color)] rounded-xl text-[var(--text-secondary)] transition-all">
-                                <ArrowUpRight className="rotate-45" size={16} />
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="space-y-4 overflow-y-auto max-h-[400px] pr-2 scrollbar-none relative z-10">
-                        {stats.coverage.map((item) => (
-                            <div key={item.id} className="flex items-center justify-between p-4 rounded-2xl bg-[var(--bg-color)] border border-[var(--border-color)] hover:border-indigo-500/30 hover:bg-[var(--card-bg)] transition-all group">
-                                <div className="flex items-center gap-4">
-                                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-500 ${item.hasInvoice
-                                        ? 'bg-emerald-500/10 text-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.1)]'
-                                        : 'bg-[var(--border-color)] text-[var(--text-secondary)]'
-                                        }`}>
-                                        {item.hasInvoice ? <CheckCircle2 size={20} /> : <div className="w-2 h-2 rounded-full bg-zinc-700" />}
-                                    </div>
-                                    <div>
-                                        <p className={`text-xs font-black uppercase tracking-tight ${item.hasInvoice ? 'text-[var(--text-color)]' : 'text-[var(--text-secondary)]'}`}>
-                                            {item.name}
-                                        </p>
-                                        <p className="text-[9px] text-[var(--text-secondary)] font-bold uppercase tracking-widest">
-                                            {item.hasInvoice ? 'Facturado' : 'Aún sin comprobante'}
-                                        </p>
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                    <div className="mt-auto pt-6 px-2 opacity-50">
-                        <div className="h-1 bg-[var(--border-color)] rounded-full overflow-hidden">
-                            <div
-                                className="h-full bg-indigo-500 transition-all duration-500"
-                                style={{ width: `${(stats.coverage.filter(c => c.hasInvoice).length / stats.coverage.length) * 100}%` }}
-                            />
-                        </div>
                     </div>
                 </div>
 
