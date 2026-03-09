@@ -494,7 +494,67 @@ const Dashboard = ({ onNavigate }) => {
             }
         });
 
-        // PAGE 2 - ANNUAL + PORTFOLIO
+        // PAGE 2 - ALERTAS CRITICAS Y PENDIENTES
+        doc.addPage();
+        doc.setFillColor(indigo[0], indigo[1], indigo[2]);
+        doc.rect(0, 0, pageW, 25, 'F');
+        doc.setFontSize(16);
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.text('GESTION DE ALERTAS CRITICAS', 20, 17);
+
+        y = 40;
+        // 1. Vencimientos Próximos
+        if (stats.alerts.expiring.length > 0) {
+            doc.setFontSize(13);
+            doc.setTextColor(indigo[0], indigo[1], indigo[2]);
+            doc.text('Vencimientos (Proximos 7 dias) - ' + stats.alerts.expiring.length, 15, y);
+            autoTable(doc, {
+                startY: y + 4,
+                head: [['Cliente', 'Poliza', 'Compania', 'Ramo', 'Vencimiento']],
+                body: stats.alerts.expiring.map(p => [p.clientName || 'S/N', p.policyNumber || 'S/N', p.company || 'S/C', p.riskType || 'Otro', p.endDate]),
+                theme: 'grid',
+                headStyles: { fillColor: indigo },
+                margin: { left: 15, right: 15 }
+            });
+            y = doc.lastAutoTable.finalY + 15;
+        }
+
+        // 2. Pendientes de Facturación
+        if (stats.alerts.pendingInvoices.length > 0) {
+            if (y + 40 > 280) { doc.addPage(); y = 30; }
+            doc.setFontSize(13);
+            doc.setTextColor(amber[0], amber[1], amber[2]);
+            doc.text('Companias Pendientes de Facturacion - ' + stats.alerts.pendingInvoices.length, 15, y);
+            autoTable(doc, {
+                startY: y + 4,
+                head: [['Nombre de Compania', 'CUIT']],
+                body: stats.alerts.pendingInvoices.map(c => [c.name, c.cuit || '-']),
+                theme: 'grid',
+                headStyles: { fillColor: amber },
+                margin: { left: 15, right: 15 }
+            });
+            y = doc.lastAutoTable.finalY + 15;
+        }
+
+        // 3. Pólizas sin Archivo PDF
+        if (stats.alerts.missingFiles.length > 0) {
+            if (y + 40 > 280) { doc.addPage(); y = 30; }
+            doc.setFontSize(13);
+            doc.setTextColor(rose[0], rose[1], rose[2]);
+            doc.text('Polizas Sin PDF Adjunto - ' + stats.alerts.missingFiles.length, 15, y);
+            autoTable(doc, {
+                startY: y + 4,
+                head: [['Cliente', 'Poliza', 'Compania', 'Vigencia']],
+                body: stats.alerts.missingFiles.map(p => [p.clientName || 'S/N', p.policyNumber || '-', p.company || '-', p.endDate || '-']),
+                theme: 'grid',
+                headStyles: { fillColor: rose },
+                margin: { left: 15, right: 15 }
+            });
+            y = doc.lastAutoTable.finalY + 15;
+        }
+
+        // PAGE 3 - ACUMULADO ANUAL Y CARTERA
         doc.addPage();
         doc.setFillColor(indigo[0], indigo[1], indigo[2]);
         doc.rect(0, 0, pageW, 20, 'F');
