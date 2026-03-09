@@ -322,7 +322,7 @@ const Dashboard = ({ onNavigate }) => {
             doc.text(sub, x + 10, y + 26);
         };
         const gColor = stats.growthThisMonth >= 0 ? emerald : rose;
-        const gSign = stats.growthThisMonth >= 0 ? '\u25b2' : '\u25bc';
+        const gSign = stats.growthThisMonth >= 0 ? '+' : '-';
         drawCard(15, 'Facturacion Mes Actual', fmtMoney(stats.totalThisMonth), stats.countThisMonth + ' facturas emitidas', indigo);
         drawCard(15 + cardW + 5, 'Mes Anterior', fmtMoney(stats.totalLastMonth), stats.countLastMonth + ' facturas emitidas', amber);
         drawCard(15 + (cardW + 5) * 2, 'Crecimiento Mensual', gSign + ' ' + Math.abs(stats.growthThisMonth) + '%', stats.growthThisMonth >= 0 ? 'Tendencia positiva' : 'Tendencia negativa', gColor);
@@ -476,20 +476,23 @@ const Dashboard = ({ onNavigate }) => {
             const prev = d['2025'] || 0;
             const curr = d['2026'] || 0;
             const pct = prev > 0 ? Math.round(((curr - prev) / prev) * 100) : (curr > 0 ? 100 : 0);
-            const arrow = (curr === 0 && prev === 0) ? '-' : (pct >= 0 ? '\u25b2 ' + pct + '%' : '\u25bc ' + Math.abs(pct) + '%');
+            const arrow = (curr === 0 && prev === 0) ? '-' : (pct >= 0 ? '+ ' + pct + '%' : '- ' + Math.abs(pct) + '%');
             return [mNames[i], prev > 0 ? fmtMoney(prev) : '-', curr > 0 ? fmtMoney(curr) : '-', arrow];
         });
         autoTable(doc, {
-            startY: y + 10, head: [['Mes', '2025', '2026', 'Crecimiento']], body: evoRows, theme: 'grid',
+            startY: y + 10,
+            head: [['Mes', '2025', '2026', 'Crecimiento']],
+            body: evoRows,
+            theme: 'grid',
             headStyles: { fillColor: indigo, fontSize: 9, fontStyle: 'bold', halign: 'center' },
             bodyStyles: { fontSize: 8, halign: 'center' },
             columnStyles: { 0: { fontStyle: 'bold', halign: 'left' }, 3: { fontStyle: 'bold' } },
-            margin: { left: 15, right: 15 },
+            margin: { left: 15, right: 15, bottom: 25 }, // Margen inferior para evitar solapamiento
             didParseCell: (data) => {
                 if (data.section === 'body' && data.column.index === 3) {
                     const t = data.cell.raw || '';
-                    if (t.includes('\u25b2')) data.cell.styles.textColor = emerald;
-                    else if (t.includes('\u25bc')) data.cell.styles.textColor = rose;
+                    if (t.includes('+')) data.cell.styles.textColor = emerald;
+                    else if (t.includes('-') && t !== '-') data.cell.styles.textColor = rose;
                 }
             }
         });
@@ -515,7 +518,7 @@ const Dashboard = ({ onNavigate }) => {
                 body: stats.alerts.expiring.map(p => [p.clientName || 'S/N', p.policyNumber || 'S/N', p.company || 'S/C', p.riskType || 'Otro', p.endDate]),
                 theme: 'grid',
                 headStyles: { fillColor: indigo },
-                margin: { left: 15, right: 15 }
+                margin: { left: 15, right: 15, bottom: 25 }
             });
             y = doc.lastAutoTable.finalY + 15;
         }
@@ -532,7 +535,7 @@ const Dashboard = ({ onNavigate }) => {
                 body: stats.alerts.pendingInvoices.map(c => [c.name, c.cuit || '-']),
                 theme: 'grid',
                 headStyles: { fillColor: amber },
-                margin: { left: 15, right: 15 }
+                margin: { left: 15, right: 15, bottom: 25 }
             });
             y = doc.lastAutoTable.finalY + 15;
         }
@@ -549,7 +552,7 @@ const Dashboard = ({ onNavigate }) => {
                 body: stats.alerts.missingFiles.map(p => [p.clientName || 'S/N', p.policyNumber || '-', p.company || '-', p.endDate || '-']),
                 theme: 'grid',
                 headStyles: { fillColor: rose },
-                margin: { left: 15, right: 15 }
+                margin: { left: 15, right: 15, bottom: 25 }
             });
             y = doc.lastAutoTable.finalY + 15;
         }
@@ -598,7 +601,7 @@ const Dashboard = ({ onNavigate }) => {
         // Year growth bar
         y += 30;
         const yrGC = stats.yearEvolution >= 0 ? emerald : rose;
-        const yrS = stats.yearEvolution >= 0 ? '\u25b2' : '\u25bc';
+        const yrS = stats.yearEvolution >= 0 ? '+' : '-';
         doc.setFillColor(yrGC[0], yrGC[1], yrGC[2]);
         doc.roundedRect(15, y, pageW - 30, 12, 3, 3, 'F');
         doc.setFontSize(11);
@@ -629,7 +632,7 @@ const Dashboard = ({ onNavigate }) => {
             ],
             theme: 'striped', headStyles: { fillColor: slate700, fontSize: 10, fontStyle: 'bold' },
             bodyStyles: { fontSize: 9, cellPadding: 4 }, columnStyles: { 0: { fontStyle: 'bold' } },
-            margin: { left: 15, right: 15 }
+            margin: { left: 15, right: 15, bottom: 25 }
         });
 
         // TOP ASEGURADORAS POR POLIZAS
@@ -643,7 +646,7 @@ const Dashboard = ({ onNavigate }) => {
             startY: lastY2 + 4, head: [['Aseguradora', 'Polizas', 'Distribucion por Ramo']], body: compR,
             theme: 'grid', headStyles: { fillColor: indigo, fontSize: 9, fontStyle: 'bold' },
             bodyStyles: { fontSize: 8 }, columnStyles: { 0: { fontStyle: 'bold' }, 2: { fontSize: 7 } },
-            margin: { left: 15, right: 15 }
+            margin: { left: 15, right: 15, bottom: 25 }
         });
 
         // FOOTER
