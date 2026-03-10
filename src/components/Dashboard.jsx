@@ -295,7 +295,7 @@ const Dashboard = ({ onNavigate }) => {
         doc.text('REPORTE EJECUTIVO', 20, 18);
         doc.setFontSize(12);
         doc.setFont('helvetica', 'normal');
-        doc.text(stats.monthName.toUpperCase() + ' ' + viewDate.getFullYear() + ' \u2022 Gustavo Rodas Seguros', 20, 28);
+        doc.text(stats.monthName.toUpperCase() + ' ' + viewDate.getFullYear() + ' - Gustavo Rodas Seguros', 20, 28);
         doc.setFontSize(9);
         doc.setTextColor(200, 200, 255);
         doc.text('Generado: ' + dateStr + ' ' + timeStr, 20, 36);
@@ -706,6 +706,24 @@ const Dashboard = ({ onNavigate }) => {
                                     >
                                         <FileText size={14} className="text-indigo-500" />
                                         Generar Reporte PDF
+                                    </button>
+                                    <button
+                                        onClick={async () => {
+                                            try {
+                                                const btn = document.getElementById('btn-send-report');
+                                                if (btn) { btn.textContent = 'Enviando...'; btn.disabled = true; }
+                                                const res = await fetch('http://localhost:3002/api/test-report');
+                                                const data = await res.json();
+                                                if (data.success) alert('Reporte enviado con exito a tu email.');
+                                                else alert('Error: ' + (data.error || 'Desconocido'));
+                                                if (btn) { btn.textContent = 'Enviar por Email'; btn.disabled = false; }
+                                            } catch (e) { alert('Error: Asegurate de que la App de escritorio este abierta.'); }
+                                        }}
+                                        id="btn-send-report"
+                                        className="flex items-center gap-2 px-6 py-2.5 bg-indigo-500 hover:bg-indigo-600 border border-indigo-400/30 rounded-xl text-[10px] font-black text-white uppercase tracking-widest transition-all active:scale-95 whitespace-nowrap shadow-lg shadow-indigo-500/20"
+                                    >
+                                        <Mail size={14} />
+                                        Enviar por Email
                                     </button>
                                 </div>
                             </div>

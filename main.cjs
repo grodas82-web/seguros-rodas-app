@@ -87,6 +87,11 @@ async function sendExpiringPoliciesReport() {
             if (u.includes('HAMBURGO')) return '__CANON_HAMBURGO';
             if (u.includes('INTEGRITY')) return '__CANON_INTEGRITY';
             if (u.includes('TRIUNFO')) return '__CANON_TRIUNFO';
+            if (u.includes('EXPERTA')) return '__CANON_EXPERTA';
+            if (u.includes('GALENO')) return '__CANON_GALENO';
+            if (u.includes('OMINT')) return '__CANON_OMINT';
+            if (u.includes('BERKLEY')) return '__CANON_BERKLEY';
+            if (u.includes('NOBLE')) return '__CANON_NOBLE';
             return null;
         };
 
@@ -94,7 +99,8 @@ async function sendExpiringPoliciesReport() {
             if (!name) return '';
             let n = name.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
             return n.toLowerCase()
-                .replace(/s\.a\.|sa|compia|compañía|cia\.| \/|seg\.|argentina|nacion|asoc\.|mutual|asociacin|asociacion|riesgos|trabajo/gi, '')
+                .replace(/s\.a\.|sa|compia|compañía|cia\.| \/|seg\.|argentina|nacion|asoc\.|mutual|asociacin|asociacion|riesgos|trabajo|art|seguros|servicios/gi, '')
+                .replace(/\s+/g, '')
                 .replace(/[^a-z0-9]/g, '')
                 .trim();
         };
@@ -145,7 +151,7 @@ async function sendExpiringPoliciesReport() {
         });
 
         // --- Lógica 3: Pólizas sin Adjuntos ---
-        const missingFiles = policies.filter(p => !p.status === 'Anulada' && !p.fileUrl && !p.fileBase64 && !(p.attachments && p.attachments.length > 0) && !isAutoExpired(p));
+        const missingFiles = policies.filter(p => p.status !== 'Anulada' && !p.fileUrl && !p.fileBase64 && !(p.attachments && p.attachments.length > 0) && !isAutoExpired(p));
 
         const totalItems = expiring.length + pendingCompanies.length + missingFiles.length;
         if (totalItems === 0) {
@@ -153,68 +159,121 @@ async function sendExpiringPoliciesReport() {
             return;
         }
 
-        // --- Generar PDF ---
+        // --- Generar PDF Profesional (Sincronizado con Dashboard) ---
         const doc = new jsPDF();
-        let currentY = 20;
+        const pageW = doc.internal.pageSize.width;
+        const indigo = [79, 70, 229];
+        const amber = [245, 158, 11];
+        const roseColor = [244, 63, 94];
+        const slate700 = [51, 65, 85];
+        const slate400 = [148, 163, 184];
+        const dateStr = now.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const timeStr = now.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
 
-        doc.setFontSize(18);
-        doc.text("Reporte de Notificaciones Pendientes", 14, currentY);
-        currentY += 10;
+        // HEADER
+        doc.setFillColor(indigo[0], indigo[1], indigo[2]);
+        doc.rect(0, 0, pageW, 35, 'F');
+        doc.setFontSize(20);
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.text('GESTION DE ALERTAS CRITICAS', 20, 16);
         doc.setFontSize(10);
-        doc.text(`Generado: ${new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}`, 14, currentY);
-        currentY += 15;
+        doc.setFont('helvetica', 'normal');
+        doc.text('Gustavo Rodas Seguros - Reporte Automatico', 20, 24);
+        doc.setFontSize(8);
+        doc.setTextColor(200, 200, 255);
+        doc.text('Generado: ' + dateStr + ' ' + timeStr, 20, 31);
 
-        // Vencimientos a 7 días
-        if (expiring.length > 0) {
+        // KPI Summary bar
+        let currentY = 45;
+        const summaryW = (pageW - 50) / 3;
+        const drawSummaryCard = (x, label, value, color) => {
+            doc.setFillColor(241, 245, 249);
+            doc.roundedRect(x, currentY, summaryW, 18, 2, 2, 'F');
+            doc.setFillColor(color[0], color[1], color[2]);
+            doc.roundedRect(x, currentY, 3, 18, 1, 1, 'F');
+            doc.setFontSize(7);
+            doc.setTextColor(slate400[0], slate400[1], slate400[2]);
+            doc.setFont('helvetica', 'normal');
+            doc.text(label.toUpperCase(), x + 8, currentY + 7);
             doc.setFontSize(14);
-            doc.text(`Vencimientos (Próximos 7 días) - ${expiring.length}`, 14, currentY);
-            currentY += 5;
+            doc.setTextColor(slate700[0], slate700[1], slate700[2]);
+            doc.setFont('helvetica', 'bold');
+            doc.text(value, x + 8, currentY + 15);
+        };
+        drawSummaryCard(15, 'Vencimientos', expiring.length.toString(), indigo);
+        drawSummaryCard(15 + summaryW + 5, 'Pendientes Fact.', pendingCompanies.length.toString(), amber);
+        drawSummaryCard(15 + (summaryW + 5) * 2, 'Sin PDF', missingFiles.length.toString(), roseColor);
+        currentY += 28;
+
+        // 1. Vencimientos a 7 dias
+        if (expiring.length > 0) {
+            doc.setFontSize(12);
+            doc.setTextColor(indigo[0], indigo[1], indigo[2]);
+            doc.setFont('helvetica', 'bold');
+            doc.text('Vencimientos (Proximos 7 dias) - ' + expiring.length, 15, currentY);
             autoTable(doc, {
-                startY: currentY,
-                head: [['Cliente', 'Póliza', 'Compañía', 'Ramo', 'Vencimiento']],
+                startY: currentY + 4,
+                head: [['Cliente', 'Poliza', 'Compania', 'Ramo', 'Vencimiento']],
                 body: expiring.map(p => [p.clientName || 'S/N', p.policyNumber || 'S/N', p.company || 'S/C', p.riskType || 'Otro', p.endDate]),
                 theme: 'grid',
-                headStyles: { fillStyle: [79, 70, 229] } // Indigo
+                headStyles: { fillColor: indigo, fontSize: 8, fontStyle: 'bold' },
+                bodyStyles: { fontSize: 8 },
+                margin: { left: 15, right: 15, bottom: 25 }
             });
-            currentY = doc.lastAutoTable.finalY + 15;
+            currentY = doc.lastAutoTable.finalY + 12;
         }
 
-        // Compañías Pendientes
+        // 2. Companias Pendientes de Facturacion
         if (pendingCompanies.length > 0) {
-            if (currentY + 20 > doc.internal.pageSize.height) {
-                doc.addPage();
-                currentY = 20;
-            }
-            doc.setFontSize(14);
-            doc.text(`Compañías Pendientes de Facturación - ${pendingCompanies.length}`, 14, currentY);
-            currentY += 5;
+            if (currentY + 40 > 270) { doc.addPage(); currentY = 30; }
+            doc.setFontSize(12);
+            doc.setTextColor(amber[0], amber[1], amber[2]);
+            doc.setFont('helvetica', 'bold');
+            doc.text('Companias Pendientes de Facturacion - ' + pendingCompanies.length, 15, currentY);
             autoTable(doc, {
-                startY: currentY,
-                head: [['Nombre de Compañía', 'CUIT']],
+                startY: currentY + 4,
+                head: [['Nombre de Compania', 'CUIT']],
                 body: pendingCompanies.map(c => [c.name, c.cuit || '-']),
                 theme: 'grid',
-                headStyles: { fillStyle: [245, 158, 11] } // Amber
+                headStyles: { fillColor: amber, fontSize: 8, fontStyle: 'bold' },
+                bodyStyles: { fontSize: 8 },
+                margin: { left: 15, right: 15, bottom: 25 }
             });
-            currentY = doc.lastAutoTable.finalY + 15;
+            currentY = doc.lastAutoTable.finalY + 12;
         }
 
-        // Pólizas sin Archivo
+        // 3. Polizas sin Archivo PDF
         if (missingFiles.length > 0) {
-            if (currentY + 20 > doc.internal.pageSize.height) {
-                doc.addPage();
-                currentY = 20;
-            }
-            doc.setFontSize(14);
-            doc.text(`Pólizas Sin PDF Adjunto - ${missingFiles.length}`, 14, currentY);
-            currentY += 5;
+            if (currentY + 40 > 270) { doc.addPage(); currentY = 30; }
+            doc.setFontSize(12);
+            doc.setTextColor(roseColor[0], roseColor[1], roseColor[2]);
+            doc.setFont('helvetica', 'bold');
+            doc.text('Polizas Sin PDF Adjunto - ' + missingFiles.length, 15, currentY);
             autoTable(doc, {
-                startY: currentY,
-                head: [['Cliente', 'Póliza', 'Compañía', 'Vigencia']],
+                startY: currentY + 4,
+                head: [['Cliente', 'Poliza', 'Compania', 'Vigencia']],
                 body: missingFiles.map(p => [p.clientName || 'S/N', p.policyNumber || '-', p.company || '-', p.endDate || '-']),
                 theme: 'grid',
-                headStyles: { fillStyle: [239, 68, 68] } // Red
+                headStyles: { fillColor: roseColor, fontSize: 8, fontStyle: 'bold' },
+                bodyStyles: { fontSize: 8 },
+                margin: { left: 15, right: 15, bottom: 25 }
             });
-            currentY = doc.lastAutoTable.finalY + 15;
+        }
+
+        // FOOTER on all pages
+        const totalPages = doc.internal.getNumberOfPages();
+        for (let pg = 1; pg <= totalPages; pg++) {
+            doc.setPage(pg);
+            doc.setDrawColor(indigo[0], indigo[1], indigo[2]);
+            doc.setLineWidth(0.5);
+            doc.line(15, 282, pageW - 15, 282);
+            doc.setFontSize(7);
+            doc.setTextColor(slate400[0], slate400[1], slate400[2]);
+            doc.setFont('helvetica', 'normal');
+            doc.text('Pagina ' + pg + ' de ' + totalPages, 15, 288);
+            doc.text('Confidencial - Uso interno', pageW / 2, 288, { align: 'center' });
+            doc.text('J&L Brokers', pageW - 15, 288, { align: 'right' });
         }
 
         const pdfBuffer = Buffer.from(doc.output('arraybuffer'));
