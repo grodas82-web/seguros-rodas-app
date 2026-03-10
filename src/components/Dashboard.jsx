@@ -79,6 +79,19 @@ const Dashboard = ({ onNavigate }) => {
         const chartRaw = Array(12).fill(null).map(() => ({ '2024': 0, '2025': 0, '2026': 0 }));
         const companySumsThisMonth = new Map();
         const companySumsLastMonth = new Map();
+        const loadedThisMonthSet = new Set();
+        const isAutoExpired = (p) => {
+            if (!p.endDate || p.isCancelled) return false;
+            const risk = (p.riskType || '').toLowerCase();
+            if (!risk.includes('accidente')) return false;
+            const start = p.startDate ? new Date(p.startDate) : null;
+            const end = new Date(p.endDate);
+            if (start) {
+                const diffDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+                if (diffDays > 32) return false;
+            }
+            return end < new Date();
+        };
         const normalizeName = (n) => {
             if (!n) return '';
             return n.normalize("NFD")
