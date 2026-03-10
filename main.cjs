@@ -433,11 +433,6 @@ function startInternalBridge() {
         });
     });
 
-    // Manejo de 404 JSON (Para evitar el error "Unexpected token <")
-    bridgeApp.use((req, res) => {
-        res.status(404).json({ success: false, error: `Ruta no encontrada en Bridge Interno: ${req.url}` });
-    });
-
     // Nuevo: Endpoint para probar el reporte manualmente
     bridgeApp.get('/api/test-report', async (req, res) => {
         console.log("📧 [Bridge] Petición de reporte manual recibida...");
@@ -447,6 +442,11 @@ function startInternalBridge() {
         } catch (error) {
             res.status(500).json({ success: false, error: error.message });
         }
+    });
+
+    // Manejo de 404 JSON (Para evitar el error "Unexpected token <")
+    bridgeApp.use((req, res) => {
+        res.status(404).json({ success: false, error: `Ruta no encontrada en Bridge Interno: ${req.url}` });
     });
 
     // Programación Cron: Lunes y Viernes a las 11:59 AM
