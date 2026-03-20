@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import { analyzeIIBBCertificate } from '../services/aiManager';
 import { useAppContext } from '../context/AppContext';
+import { db } from '../firebase/config';
+import { collection, addDoc, onSnapshot, orderBy, query, deleteDoc, doc, updateDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
 
 // ─────────────────────────────────────────────
 // CONSTANTES
@@ -68,7 +70,6 @@ async function parsearPDF(file) {
     const retenciones = await analyzeIIBBCertificate(base64);
 
     return (retenciones || []).map(r => ({
-        id:           Date.now() + Math.random(),
         archivo:      file.name,
         compania:     r.compania     || '',
         cuit:         String(r.cuit  || '').replace(/\D/g, ''),
@@ -121,12 +122,7 @@ export default function IIBBLiquidacion() {
         } catch {}
         return Object.fromEntries(COMPANIES.map(c => [c, false]));
     });
-    const [retenciones, setRetenciones] = useState(() => {
-        try {
-            const saved = localStorage.getItem('iibb_retenciones');
-            return saved ? JSON.parse(saved) : [];
-        } catch { return []; }
-    });
+    const [retenciones, setRetenciones] = useState([]);
     const [procesando, setProcesando]   = useState(false);
     const [progreso, setProgreso]       = useState({ total: 0, actual: 0, archivo: '' });
     const [errores, setErrores]         = useState([]);
@@ -138,8 +134,16 @@ export default function IIBBLiquidacion() {
     const [sircrebResult, setSircrebResult] = useState(null);
     const fileInputRef = useRef(null);
 
-    // Persistencia automática
-    useEffect(() => { localStorage.setItem('iibb_retenciones',   JSON.stringify(retenciones)); }, [retenciones]);
+    // Persistencia: retenciones en Firestore (accesibles desde el reporte de mail)
+    useEffect(() => {
+        const q = query(collection(db, 'iibb_retenciones'), orderBy('createdAt', 'asc'));
+        const unsub = onSnapshot(q, snap => {
+            setRetenciones(snap.docs.map(d => ({ ...d.data(), id: d.id })));
+        });
+        return () => unsub();
+    }, []);
+
+    // Checklist y alícuota en localStorage (preferencias locales)
     useEffect(() => { localStorage.setItem('iibb_checklist',      JSON.stringify(checklist));   }, [checklist]);
     useEffect(() => { localStorage.setItem('iibb_alicuota_banco', String(alicuotaBanco));       }, [alicuotaBanco]);
 
@@ -204,7 +208,10 @@ export default function IIBBLiquidacion() {
                 errs.push({ archivo: file.name, error: err.message });
             }
         }
-        setRetenciones(prev => [...prev, ...nuevos]);
+        // Guardar cada retención nueva en Firestore
+        for (const r of nuevos) {
+            await addDoc(collection(db, 'iibb_retenciones'), { ...r, createdAt: serverTimestamp() });
+        }
         // Auto-check y auto-agregar compañías detectadas
         if (nuevos.length) {
             setChecklist(prev => {
@@ -225,15 +232,16 @@ export default function IIBBLiquidacion() {
         setProgreso({ total: 0, actual: 0, archivo: '' });
     }, []);
 
-    const eliminar = (id) => setRetenciones(prev => prev.filter(r => r.id !== id));
+    const eliminar = (id) => deleteDoc(doc(db, 'iibb_retenciones', id));
 
     const iniciarEdicion = (r) => {
         setEditId(r.id);
         setEditData({ ...r });
     };
 
-    const guardarEdicion = () => {
-        setRetenciones(prev => prev.map(r => r.id === editId ? { ...editData } : r));
+    const guardarEdicion = async () => {
+        const { id, createdAt, ...data } = editData;
+        await updateDoc(doc(db, 'iibb_retenciones', id), data);
         setEditId(null);
         setEditData({});
     };
@@ -500,9 +508,11 @@ export default function IIBBLiquidacion() {
                                             </span>
                                         </div>
                                         <button
-                                            onClick={() => {
+                                            onClick={async () => {
                                                 if (window.confirm('¿Iniciar nuevo período? Se borrarán todas las retenciones acumuladas.')) {
-                                                    setRetenciones([]);
+                                                    const batch = writeBatch(db);
+                                                    retenciones.forEach(r => batch.delete(doc(db, 'iibb_retenciones', r.id)));
+                                                    await batch.commit();
                                                 }
                                             }}
                                             className="text-[10px] font-black uppercase tracking-widest text-rose-400 hover:text-rose-300 transition-colors"

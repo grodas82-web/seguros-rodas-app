@@ -1,4 +1,9 @@
-const { app, BrowserWindow } = require('electron');
+const electronAPI = require('electron');
+console.log('--- DEBUG INITIALIZATION ---');
+console.log('process.versions.electron:', process.versions ? process.versions.electron : 'undefined');
+console.log('typeof electronAPI:', typeof electronAPI);
+console.log('electronAPI keys:', Object.keys(electronAPI || {}));
+const { app, BrowserWindow, dialog, ipcMain } = electronAPI;
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -10,20 +15,41 @@ const { jsPDF } = require('jspdf');
 const autoTable = require('jspdf-autotable').default || require('jspdf-autotable');
 const { initializeApp } = require('firebase/app');
 const { getFirestore, collection, getDocs, query, where, Timestamp } = require('firebase/firestore');
+const AfipHandler = require('./afipHandler.cjs');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
+
+// Logs de error - Inicialización diferida
+let logPath;
+function setupLogging() {
+    logPath = path.join(app.getPath('userData'), 'crash.log');
+    process.on('uncaughtException', (error) => {
+        const msg = `[${new Date().toISOString()}] CRASH: ${error.stack}\n`;
+        if (logPath) fs.appendFileSync(logPath, msg);
+        console.error(msg);
+    });
+}
 
 // --- Configuración Firebase (Main Process) ---
 const firebaseConfig = {
-    apiKey: process.env.VITE_GEMINI_API_KEY,
-    authDomain: "finanzastg.firebaseapp.com",
-    projectId: "finanzastg",
-    storageBucket: "finanzastg.firebasestorage.app",
-    messagingSenderId: "980629069726",
-    appId: "1:980629069726:web:0810594773af27c552c08f"
+    apiKey: process.env.VITE_FIREBASE_API_KEY,
+    authDomain: process.env.VITE_FIREBASE_AUTH_DOMAIN,
+    projectId: process.env.VITE_FIREBASE_PROJECT_ID,
+    storageBucket: process.env.VITE_FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: process.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+    appId: process.env.VITE_FIREBASE_APP_ID
 };
 
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
+
+// Log de inicio exitoso del motor
+function logStartup() {
+    if (!logPath) return;
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] APP_STARTING: Motor iniciado con exito.\n`);
+    if (Object.values(firebaseConfig).some(v => !v)) {
+        fs.appendFileSync(logPath, `[${new Date().toISOString()}] WARNING: Faltan variables de entorno en Firebase config.\n`);
+    }
+}
 
 // === Registro de IDs enviados (anti-duplicado) ===
 const sentNotificationsFile = path.join(os.tmpdir(), 'sent_notifications.json');
@@ -106,15 +132,28 @@ async function sendExpiringPoliciesReport() {
         };
 
         // --- Obtener Datos ---
-        const [policiesSnap, invoicesSnap, companiesSnap] = await Promise.all([
+        const [policiesSnap, invoicesSnap, companiesSnap, iibbSnap] = await Promise.all([
             getDocs(query(collection(db, 'policies'))),
             getDocs(query(collection(db, 'invoices'))),
-            getDocs(query(collection(db, 'companies')))
+            getDocs(query(collection(db, 'companies'))),
+            getDocs(query(collection(db, 'iibb_retenciones')))
         ]);
 
-        const policies = policiesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-        const invoices = invoicesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const policies  = policiesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const invoices  = invoicesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
         const companies = companiesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const iibbRets  = iibbSnap.docs.map(d => d.data());
+
+        // --- Lógica IIBB: retenciones pendientes ---
+        const iibbTotal = iibbRets.reduce((s, r) => s + (Number(r.monto) || 0), 0);
+        const iibbByComp = {};
+        iibbRets.forEach(r => {
+            const k = r.compania || 'SIN COMPAÑÍA';
+            iibbByComp[k] = (iibbByComp[k] || 0) + (Number(r.monto) || 0);
+        });
+        const iibbRows = Object.entries(iibbByComp)
+            .sort((a, b) => b[1] - a[1])
+            .map(([comp, monto]) => [comp, `$ ${monto.toLocaleString('es-AR', { minimumFractionDigits: 2 })}`]);
 
         // --- Lógica 1: Vencimientos a 7 días ---
         const expiring = policies.filter(p => {
@@ -153,9 +192,9 @@ async function sendExpiringPoliciesReport() {
         // --- Lógica 3: Pólizas sin Adjuntos ---
         const missingFiles = policies.filter(p => p.status !== 'Anulada' && !p.fileUrl && !p.fileBase64 && !(p.attachments && p.attachments.length > 0) && !isAutoExpired(p));
 
-        const totalItems = expiring.length + pendingCompanies.length + missingFiles.length;
+        const totalItems = expiring.length + pendingCompanies.length + missingFiles.length + iibbRets.length;
         if (totalItems === 0) {
-            console.log("ℹ️ [Reporte] No hay notificaciones pendientes (0 venciendo, 0 pendientes, 0 sin archivo). No se envía correo.");
+            console.log("ℹ️ [Reporte] No hay notificaciones pendientes. No se envía correo.");
             return;
         }
 
@@ -184,9 +223,10 @@ async function sendExpiringPoliciesReport() {
         doc.setTextColor(200, 200, 255);
         doc.text('Generado: ' + dateStr + ' ' + timeStr, 20, 31);
 
-        // KPI Summary bar
+        // KPI Summary bar (4 cards)
+        const emerald = [16, 185, 129];
         let currentY = 45;
-        const summaryW = (pageW - 50) / 3;
+        const summaryW = (pageW - 55) / 4;
         const drawSummaryCard = (x, label, value, color) => {
             doc.setFillColor(241, 245, 249);
             doc.roundedRect(x, currentY, summaryW, 18, 2, 2, 'F');
@@ -196,14 +236,15 @@ async function sendExpiringPoliciesReport() {
             doc.setTextColor(slate400[0], slate400[1], slate400[2]);
             doc.setFont('helvetica', 'normal');
             doc.text(label.toUpperCase(), x + 8, currentY + 7);
-            doc.setFontSize(14);
+            doc.setFontSize(12);
             doc.setTextColor(slate700[0], slate700[1], slate700[2]);
             doc.setFont('helvetica', 'bold');
             doc.text(value, x + 8, currentY + 15);
         };
-        drawSummaryCard(15, 'Vencimientos', expiring.length.toString(), indigo);
-        drawSummaryCard(15 + summaryW + 5, 'Pendientes Fact.', pendingCompanies.length.toString(), amber);
-        drawSummaryCard(15 + (summaryW + 5) * 2, 'Sin PDF', missingFiles.length.toString(), roseColor);
+        drawSummaryCard(15,                        'Vencimientos',     expiring.length.toString(),        indigo);
+        drawSummaryCard(15 + (summaryW + 5),       'Pend. Facturac.',  pendingCompanies.length.toString(), amber);
+        drawSummaryCard(15 + (summaryW + 5) * 2,   'Sin PDF',          missingFiles.length.toString(),     roseColor);
+        drawSummaryCard(15 + (summaryW + 5) * 3,   'IIBB Pendiente',   iibbRets.length.toString() + ' ret.', emerald);
         currentY += 28;
 
         // 1. Vencimientos a 7 dias
@@ -261,6 +302,25 @@ async function sendExpiringPoliciesReport() {
             });
         }
 
+        // 4. IIBB Retenciones Pendientes
+        if (iibbRows.length > 0) {
+            if (currentY + 40 > 270) { doc.addPage(); currentY = 30; }
+            doc.setFontSize(12);
+            doc.setTextColor(emerald[0], emerald[1], emerald[2]);
+            doc.setFont('helvetica', 'bold');
+            doc.text(`Retenciones IIBB Pendientes - ${iibbRets.length} cert. / $ ${iibbTotal.toLocaleString('es-AR', { minimumFractionDigits: 2 })}`, 15, currentY);
+            autoTable(doc, {
+                startY: currentY + 4,
+                head: [['Compañía', 'Monto Retenido']],
+                body: iibbRows,
+                theme: 'grid',
+                headStyles: { fillColor: emerald, fontSize: 8, fontStyle: 'bold' },
+                bodyStyles: { fontSize: 8 },
+                margin: { left: 15, right: 15, bottom: 25 }
+            });
+            currentY = doc.lastAutoTable.finalY + 12;
+        }
+
         // FOOTER on all pages
         const totalPages = doc.internal.getNumberOfPages();
         for (let pg = 1; pg <= totalPages; pg++) {
@@ -295,8 +355,8 @@ async function sendExpiringPoliciesReport() {
         const mailOptions = {
             from: '"Sistema Automático Gustavo Rodas" <grodas@jylbrokers.com.ar>',
             to: "grodas@jylbrokers.com.ar",
-            subject: `🚨 Reporte: Notificaciones Pendientes [${totalItems} Items]`,
-            text: `Hola Gustavo,\n\nEste es un reporte automático.\n\nResumen:\n- Vencimientos (7 días): ${expiring.length}\n- Empresas pendientes: ${pendingCompanies.length}\n- Pólizas sin PDF: ${missingFiles.length}\n\nSe adjunta el reporte detallado en PDF.\n\nSaludos,\nSistema Automático.`,
+            subject: `🚨 Gestión de Alertas Críticas [${totalItems} items] - ${dateStr}`,
+            text: `Hola Gustavo,\n\nReporte automático del sistema.\n\nRESUMEN:\n- Vencimientos próximos 7 días: ${expiring.length}\n- Compañías pendientes de facturación: ${pendingCompanies.length}\n- Pólizas sin PDF adjunto: ${missingFiles.length}\n- Retenciones IIBB pendientes: ${iibbRets.length} certificados / $ ${iibbTotal.toLocaleString('es-AR', { minimumFractionDigits: 2 })}\n\nSe adjunta el reporte detallado en PDF.\n\nSaludos,\nSistema Automático Gustavo Rodas Seguros`,
             attachments: [
                 {
                     filename: `notificaciones_${new Date().toISOString().split('T')[0]}.pdf`,
@@ -312,7 +372,14 @@ async function sendExpiringPoliciesReport() {
     }
 }
 
-const isDev = !app.isPackaged;
+function getIsDev() {
+    if (app.isPackaged) return false;
+    if (process.env.ELECTRON_FORCE_PROD === 'true') return false;
+    // Si existe el build de producción, usarlo directamente
+    const distIndex = path.join(__dirname, 'dist', 'index.html');
+    if (fs.existsSync(distIndex)) return false;
+    return true;
+}
 
 // --- Configuración del Bridge Interno ---
 function startInternalBridge() {
@@ -389,33 +456,9 @@ function startInternalBridge() {
                 });
             }
 
-            const iibbAmount = grossAmount * iibbRate;
-            const netAmount = grossAmount - iibbAmount;
-
-            const subject = `[TEST DE SISTEMA] - Gestión Realizada - ${company} - ${month}`;
-            const body = `Hola Gustavo, esta es una prueba de tu nuevo sistema automatizado.\n\n` +
-                `Estado: ÉXITO.\n\n` +
-                `Compañía: ${company}.\n\n` +
-                `Comisión Neta: $${netAmount.toLocaleString('es-AR')}.\n\n` +
-                `ID de Seguimiento: ${trackingId}`;
-
-            const transporter = nodemailer.createTransport({
-                host: "mail.jylbrokers.com.ar",
-                port: 465,
-                secure: true,
-                auth: { user: "grodas@jylbrokers.com.ar", pass: process.env.SMTP_PASS },
-                tls: { rejectUnauthorized: false }
-            });
-
-            await transporter.sendMail({
-                from: '"Sistema Gustavo Rodas Seguros" <grodas@jylbrokers.com.ar>',
-                to: to,
-                subject: subject,
-                text: body
-            });
-
+            // Notificación registrada internamente — el reporte completo se envía por cron (lunes/viernes)
             markAsSent(trackingId);
-            res.json({ success: true, trackingId, details: { company, netAmount } });
+            res.json({ success: true, trackingId, message: 'Registrado. El reporte completo se envía por el cron programado.' });
         } catch (error) {
             console.error("❌ [Bridge Interno] Error enviando notification:", error);
             res.status(500).json({ success: false, error: error.message });
@@ -489,11 +532,24 @@ function createWindow() {
         autoHideMenuBar: true
     });
 
-    if (isDev) {
+    if (getIsDev()) {
         win.loadURL('http://localhost:5173');
     } else {
-        win.loadFile(path.join(__dirname, 'dist', 'index.html'));
+        const indexPath = path.join(__dirname, 'dist', 'index.html');
+        if (!fs.existsSync(indexPath)) {
+            if (logPath) fs.appendFileSync(logPath, `[${new Date().toISOString()}] ERROR: No se encontro index.html en ${indexPath}\n`);
+        }
+        win.loadFile(indexPath);
     }
+
+    // win.webContents.openDevTools();
+
+    // Capturar logs de la consola del renderer y guardarlos en crash.log
+    win.webContents.on('console-message', (event, level, message, line, sourceId) => {
+        const levels = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
+        const logMsg = `[${new Date().toISOString()}] [RENDERER ${levels[level] || level}] ${message} (${sourceId}:${line})\n`;
+        if (logPath) fs.appendFileSync(logPath, logMsg);
+    });
 
     // Permitir abrir DevTools con Ctrl+Shift+I incluso en producción para diagnóstico
     win.webContents.on('before-input-event', (event, input) => {
@@ -505,7 +561,7 @@ function createWindow() {
 
     // Detectar si la carga falla
     win.webContents.on('did-fail-load', () => {
-        if (!isDev) {
+        if (!getIsDev()) {
             console.error('Fallo al cargar el archivo de producción.');
         } else {
             win.innerHTML = `<div style="background:white; color:black; padding:20px;">
@@ -518,8 +574,358 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+    setupLogging();
+    logStartup();
+    
+    // Handler para obtener llaves de forma DINAMICA (v19.1)
+    ipcMain.handle('get-env-keys', () => {
+        // Obtenemos llaves limpias del .env sin fallbacks a llaves muertas (V19.6)
+        return {
+            VITE_GEMINI_API_KEY_1: process.env.VITE_GEMINI_API_KEY_1,
+            VITE_GEMINI_API_KEY_2: process.env.VITE_GEMINI_API_KEY_2,
+            VITE_GEMINI_API_KEY_3: process.env.VITE_GEMINI_API_KEY_3,
+            VITE_GEMINI_API_KEY_4: process.env.VITE_GEMINI_API_KEY_4,
+            VITE_GEMINI_API_KEY_5: process.env.VITE_GEMINI_API_KEY_5,
+            VITE_GEMINI_API_KEY_6: process.env.VITE_GEMINI_API_KEY_6,
+            VITE_CLAUDE_API_KEY: process.env.VITE_CLAUDE_API_KEY
+        };
+    });
+
     bridgeServer = startInternalBridge();
     createWindow();
+
+    // --- AFIP IPC Handlers (v20.0 con robustez) ---
+    try {
+        console.log("⚙️ Registrando handlers de AFIP...");
+        const afipHandler = new AfipHandler({
+            cuit: '23294824979',
+            production: true,
+            userData: app.getPath('userData')
+        });
+
+        ipcMain.handle('afip:get-status', async () => {
+            return await afipHandler.getServerStatus();
+        });
+
+        ipcMain.handle('afip:get-last-voucher', async (event, { pos, type }) => {
+            const typeMap = { 'Factura A': 1, 'Factura B': 6, 'Factura C': 11, 'Nota Crédito A': 3, 'Nota Crédito B': 8, 'Nota Crédito C': 13 };
+            const typeId = typeMap[type] || 11;
+            return await afipHandler.getLastVoucher(pos, typeId);
+        });
+
+        ipcMain.handle('afip:create-invoice', async (event, data) => {
+            const typeMap = { 'Factura A': 1, 'Factura B': 6, 'Factura C': 11, 'Nota Crédito A': 3, 'Nota Crédito B': 8, 'Nota Crédito C': 13 };
+            data.typeId = typeMap[data.type] || 11;
+            return await afipHandler.createInvoice(data);
+        });
+        console.log("✅ Handlers de AFIP registrados satisfactoriamente.");
+    } catch (error) {
+        console.error("❌ Error critical inicializando handlers AFIP:", error);
+        // Registramos handlers vacíos que retornan el error para evitar el mensaje de "No handler registered"
+        const failResponse = { success: false, error: "Error de inicialización de AFIP: " + error.message };
+        ipcMain.handle('afip:get-status', async () => failResponse);
+        ipcMain.handle('afip:get-last-voucher', async () => failResponse);
+        ipcMain.handle('afip:create-invoice', async () => failResponse);
+    }
+
+    ipcMain.handle('afip:generate-pdf', async (event, inv) => {
+        console.log("📄 [Main] Generando PDF para factura:", inv.number);
+        try {
+            // ── Datos del emisor (fijos) ──────────────────────────────────────
+            const EMISOR = {
+                actividad:   'PRODUCTOR ASESOR DE SEGUROS',
+                razonSocial: 'RODAS GUSTAVO RAUL',
+                domicilio:   'Tinogasta 3227 Piso:1 Dpto:d - Ciudad de Buenos Aires',
+                condIVA:     'Responsable Monotributo',
+                cuit:        '23294824979',
+                iibb:        '1270652-3',
+                inicioAct:   '01/11/2013'
+            };
+
+            // ── Helpers de formato ────────────────────────────────────────────
+            const fmtDate = (d) => {
+                if (!d) return '';
+                if (d.includes('-')) {
+                    const [y, m, dd] = d.split('-');
+                    return `${dd}/${m}/${y}`;
+                }
+                return d;
+            };
+            const fmtMoney = (v) => Number(v || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const pad = (v, n) => String(v || '0').padStart(n, '0');
+
+            // ── Datos de la factura ───────────────────────────────────────────
+            const tipoLetra  = (inv.type || 'Factura C').split(' ').pop();   // "C"
+            const tipoCod    = tipoLetra === 'A' ? '001' : tipoLetra === 'B' ? '006' : '011';
+            const tipoNombre = 'FACTURA';
+            const pvStr      = pad(inv.pointOfSale || '4', 5);
+            const nroStr     = pad(inv.number || '0', 8);
+            const fechaEmis  = fmtDate(inv.date);
+            const monto      = Number(inv.amount || 0);
+            const montoStr   = fmtMoney(monto);
+            const concepto   = inv.description || inv.concept || 'Servicios de intermediación de seguros';
+            const receptor   = (inv.company || '').toUpperCase();
+            const receptorCuit = inv.cuit || '';
+            const receptorAddr = inv.address || '';
+            const condVenta  = inv.condicionVenta || 'Cuenta Corriente';
+            const condIVARec = inv.condIVA || inv.fiscalCondition || 'IVA Sujeto Exento';
+            const servDesde  = fmtDate(inv.serviceFrom || inv.date);
+            const servHasta  = fmtDate(inv.serviceTo   || inv.date);
+            const vtoPago    = fmtDate(inv.paymentDue  || inv.date);
+            const caeNum     = inv.cae || '';
+            const caeVto     = fmtDate(inv.caeExpiration);
+
+            // ── Función que dibuja UNA página ────────────────────────────────
+            const drawPage = (doc, copyLabel) => {
+                const pageW = doc.internal.pageSize.width;   // 210 mm (A4)
+                const pageH = doc.internal.pageSize.height;  // 297 mm
+                const m = 10;   // margen
+                const mid = pageW / 2;
+
+                // ── Título ORIGINAL / DUPLICADO / TRIPLICADO ─────────────────
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(14);
+                doc.setTextColor(0);
+                doc.text(copyLabel, pageW / 2, m + 6, { align: 'center' });
+
+                // ── Caja principal del encabezado ────────────────────────────
+                const hTop = m + 9;
+                const hH   = 42;
+                doc.setDrawColor(0);
+                doc.setLineWidth(0.4);
+                doc.rect(m, hTop, pageW - m * 2, hH);
+                // divisor vertical central
+                doc.line(mid, hTop, mid, hTop + hH);
+
+                // -- Letra + código (caja cuadrada central) -------------------
+                const boxSize = 14;
+                const boxX = mid - boxSize / 2;
+                const boxY = hTop - 1;
+                doc.setFillColor(255, 255, 255);
+                doc.rect(boxX, boxY, boxSize, boxSize, 'FD');
+                doc.setFontSize(22);
+                doc.setFont('helvetica', 'bold');
+                doc.text(tipoLetra, mid, boxY + 10, { align: 'center' });
+                doc.setFontSize(6);
+                doc.setFont('helvetica', 'normal');
+                doc.text(`COD. ${tipoCod}`, mid, boxY + 14, { align: 'center' });
+
+                // -- Lado izquierdo: emisor -----------------------------------
+                let lx = m + 3;
+                doc.setFontSize(10);
+                doc.setFont('helvetica', 'bold');
+                doc.text(EMISOR.actividad, lx, hTop + 8);
+
+                doc.setFontSize(8);
+                doc.setFont('helvetica', 'bold');
+                doc.text('Razón Social: ', lx, hTop + 16);
+                doc.setFont('helvetica', 'normal');
+                doc.text(EMISOR.razonSocial, lx + 22, hTop + 16);
+
+                doc.setFont('helvetica', 'bold');
+                doc.text('Domicilio Comercial: ', lx, hTop + 22);
+                doc.setFont('helvetica', 'normal');
+                const domLines = doc.splitTextToSize(EMISOR.domicilio, mid - m - 5);
+                doc.text(domLines, lx + 30, hTop + 22);
+
+                doc.setFont('helvetica', 'bold');
+                doc.text('Condición frente al IVA: ', lx, hTop + 34);
+                doc.setFont('helvetica', 'normal');
+                doc.text(EMISOR.condIVA, lx + 36, hTop + 34);
+
+                // -- Lado derecho: datos factura ------------------------------
+                let rx = mid + 3;
+                doc.setFontSize(18);
+                doc.setFont('helvetica', 'bold');
+                doc.text(tipoNombre, rx + 30, hTop + 12);
+
+                doc.setFontSize(8);
+                doc.setFont('helvetica', 'normal');
+                doc.text(`Punto de Venta: ${pvStr}`, rx, hTop + 20);
+                doc.text(`Comp. Nro: ${nroStr}`, rx + 45, hTop + 20);
+                doc.setFont('helvetica', 'bold');
+                doc.text('Fecha de Emisión: ', rx, hTop + 27);
+                doc.setFont('helvetica', 'normal');
+                doc.text(fechaEmis, rx + 27, hTop + 27);
+
+                doc.text(`CUIT: ${EMISOR.cuit}`, rx, hTop + 34);
+                doc.setFont('helvetica', 'bold');
+                doc.text('Ingresos Brutos: ', rx, hTop + 38 );
+                doc.setFont('helvetica', 'normal');
+                doc.text(EMISOR.iibb, rx + 25, hTop + 38);
+                doc.setFont('helvetica', 'bold');
+                doc.text('Fecha de Inicio de Actividades: ', rx, hTop + 42);
+                doc.setFont('helvetica', 'normal');
+                doc.text(EMISOR.inicioAct, rx + 46, hTop + 42);
+
+                // ── Fila: Período facturado ───────────────────────────────────
+                const pY = hTop + hH;
+                const pH = 10;
+                doc.setDrawColor(0);
+                doc.rect(m, pY, pageW - m * 2, pH);
+                doc.setFontSize(8);
+                doc.setFont('helvetica', 'bold');
+                doc.text('Período Facturado Desde:', m + 3, pY + 6);
+                doc.setFont('helvetica', 'normal');
+                doc.text(servDesde, m + 42, pY + 6);
+                doc.setFont('helvetica', 'bold');
+                doc.text('Hasta:', m + 62, pY + 6);
+                doc.setFont('helvetica', 'normal');
+                doc.text(servHasta, m + 74, pY + 6);
+                doc.setFont('helvetica', 'bold');
+                doc.text('Fecha de Vto. para el pago:', m + 110, pY + 6);
+                doc.setFont('helvetica', 'normal');
+                doc.text(vtoPago, m + 152, pY + 6);
+
+                // ── Caja: Receptor ────────────────────────────────────────────
+                const rY = pY + pH;
+                const rH = 22;
+                doc.setDrawColor(0);
+                doc.rect(m, rY, pageW - m * 2, rH);
+                doc.line(mid, rY, mid, rY + rH);
+
+                doc.setFontSize(8);
+                doc.setFont('helvetica', 'bold');
+                doc.text('CUIT: ', m + 3, rY + 6);
+                doc.setFont('helvetica', 'normal');
+                doc.text(receptorCuit, m + 10, rY + 6);
+
+                doc.setFont('helvetica', 'bold');
+                doc.text('Condición frente al IVA:', m + 3, rY + 12);
+                doc.setFont('helvetica', 'normal');
+                doc.text(condIVARec, m + 35, rY + 12);
+
+                doc.setFont('helvetica', 'bold');
+                doc.text('Condición de venta:', m + 3, rY + 18);
+                doc.setFont('helvetica', 'normal');
+                doc.text(condVenta, m + 31, rY + 18);
+
+                // Lado derecho receptor
+                doc.setFont('helvetica', 'bold');
+                doc.text('Apellido y Nombre / Razón Social: ', mid + 3, rY + 6);
+                doc.setFont('helvetica', 'normal');
+                const recLines = doc.splitTextToSize(receptor, mid - m - 5);
+                doc.text(recLines, mid + 3, rY + 10);
+
+                doc.setFont('helvetica', 'bold');
+                doc.text('Domicilio: ', mid + 3, rY + 18);
+                doc.setFont('helvetica', 'normal');
+                const addrLines = doc.splitTextToSize(receptorAddr, mid - m - 18);
+                doc.text(addrLines, mid + 17, rY + 18);
+
+                // ── Tabla de ítems ────────────────────────────────────────────
+                const tableY = rY + rH;
+                autoTable(doc, {
+                    startY: tableY,
+                    head: [['Código', 'Producto / Servicio', 'Cantidad', 'U. Medida', 'Precio Unit.', '% Bonif', 'Imp. Bonif.', 'Subtotal']],
+                    body: [[
+                        '',
+                        concepto,
+                        '1,00',
+                        'otras unidades',
+                        montoStr,
+                        '0,00',
+                        '0,00',
+                        montoStr
+                    ]],
+                    theme: 'grid',
+                    headStyles: { fillColor: [220, 220, 220], textColor: 0, fontStyle: 'bold', fontSize: 7 },
+                    styles: { fontSize: 7, cellPadding: 1.5 },
+                    columnStyles: {
+                        0: { cellWidth: 12 },
+                        1: { cellWidth: 65 },
+                        2: { cellWidth: 16, halign: 'right' },
+                        3: { cellWidth: 22 },
+                        4: { cellWidth: 22, halign: 'right' },
+                        5: { cellWidth: 14, halign: 'right' },
+                        6: { cellWidth: 18, halign: 'right' },
+                        7: { cellWidth: 18, halign: 'right' }
+                    },
+                    margin: { left: m, right: m }
+                });
+
+                // ── Totales ───────────────────────────────────────────────────
+                const totY = doc.lastAutoTable.finalY + 2;
+                const totH = 24;
+                doc.setDrawColor(0);
+                doc.rect(m, totY, pageW - m * 2, totH);
+                const totX = pageW - m - 3;
+                doc.setFontSize(8.5);
+                doc.setFont('helvetica', 'normal');
+                doc.text('Subtotal: $', totX - 20, totY + 8, { align: 'right' });
+                doc.setFont('helvetica', 'bold');
+                doc.text(montoStr, totX, totY + 8, { align: 'right' });
+
+                doc.setFont('helvetica', 'normal');
+                doc.text('Importe Otros Tributos: $', totX - 20, totY + 15, { align: 'right' });
+                doc.setFont('helvetica', 'bold');
+                doc.text('0,00', totX, totY + 15, { align: 'right' });
+
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(9);
+                doc.text('Importe Total: $', totX - 20, totY + 22, { align: 'right' });
+                doc.text(montoStr, totX, totY + 22, { align: 'right' });
+
+                // ── Leyenda actividad ─────────────────────────────────────────
+                const legY = totY + totH + 6;
+                doc.setDrawColor(180);
+                doc.rect(m, legY, pageW - m * 2, 10);
+                doc.setFontSize(8);
+                doc.setFont('helvetica', 'italic');
+                doc.text('"Productor Asesor de Seguros"', pageW / 2, legY + 6.5, { align: 'center' });
+
+                // ── Pie: CAE ──────────────────────────────────────────────────
+                const footY = pageH - 28;
+                doc.setDrawColor(180);
+                doc.line(m, footY, pageW - m, footY);
+
+                // Pág. X/1
+                doc.setFontSize(7.5);
+                doc.setFont('helvetica', 'normal');
+                doc.setTextColor(0);
+                doc.text('Pág. 1/1', pageW / 2, footY + 5, { align: 'center' });
+
+                // CAE info (derecha)
+                doc.setFont('helvetica', 'bold');
+                doc.text(`CAE N°: ${caeNum}`, pageW - m, footY + 5, { align: 'right' });
+                doc.text(`Fecha de Vto. de CAE: ${caeVto}`, pageW - m, footY + 10, { align: 'right' });
+
+                // Comprobante Autorizado
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(8);
+                doc.text('Comprobante Autorizado', m + 18, footY + 10);
+                doc.setFont('helvetica', 'italic');
+                doc.setFontSize(6.5);
+                doc.text('Esta Agencia no se responsabiliza por los datos ingresados en el detalle de la operación', m + 18, footY + 15);
+            };
+
+            // ── Generar las 3 copias ──────────────────────────────────────────
+            const doc = new jsPDF({ format: 'a4', unit: 'mm' });
+            const copies = ['ORIGINAL', 'DUPLICADO', 'TRIPLICADO'];
+            copies.forEach((label, i) => {
+                if (i > 0) doc.addPage();
+                drawPage(doc, label);
+            });
+
+            const pdfBuffer = Buffer.from(doc.output('arraybuffer'));
+
+            const { filePath } = await dialog.showSaveDialog({
+                title: 'Guardar Factura PDF',
+                defaultPath: `${EMISOR.cuit}_${tipoCod}_${pvStr}_${nroStr}.pdf`,
+                filters: [{ name: 'Documentos PDF', extensions: ['pdf'] }]
+            });
+
+            if (filePath) {
+                fs.writeFileSync(filePath, pdfBuffer);
+                console.log(`✅ PDF guardado: ${filePath}`);
+                return { success: true, filePath };
+            }
+            return { success: false, cancelled: true };
+        } catch (error) {
+            console.error("❌ Error generando PDF:", error);
+            return { success: false, error: error.message };
+        }
+    });
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
