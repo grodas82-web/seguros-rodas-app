@@ -10,12 +10,11 @@ import { analyzeIIBBCertificate } from '../services/aiManager';
 // CONSTANTES
 // ─────────────────────────────────────────────
 
+// Lista fija de compañías conocidas (se agregan dinámicamente al sumar retenciones/pólizas)
 const COMPANIES = [
-    'ALLIANZ', 'AMCA', 'ASOCIART', 'BERKLEY ART', 'BOSTON',
-    'EXPERTA ART', 'EXPERTA SEGUROS', 'FEDERACION PATRONAL', 'GALICIA SEGUROS', 'HDI',
-    'MAPFRE GENERALES', 'MAPFRE VIDA', 'MERCANTIL ANDINA', 'MERIDIONAL',
-    'PROVINCIA ART', 'PROVINCIA SEGUROS', 'SMG ART', 'SMG SEGUROS',
-    'SURA', 'ZURICH'
+    'ALLIANZ', 'AMCA', 'ASOCIART', 'BARBUSS', 'BERKLEY ART',
+    'EXPERTA ART', 'EXPERTA SEGUROS', 'FEDERACION PATRONAL', 'GALICIA SEGUROS',
+    'MERCANTIL ANDINA', 'MERIDIONAL', 'PROVINCIA ART', 'SMG ART', 'SMG SEGUROS', 'ZURICH'
 ];
 
 // Mapeo de nombres devueltos por Gemini → clave exacta en COMPANIES
@@ -26,10 +25,15 @@ const COMPANY_MAP = {
     'ASOCIACION MUTUAL CONDUCTORES AUTOMOTORES': 'AMCA',
     'EXPERTA ART': 'EXPERTA ART',
     'EXPERTA SEGUROS': 'EXPERTA SEGUROS',
+    'BARBUSS': 'BARBUSS',
+    'BARBUSS RISK': 'BARBUSS',
+    'BARBUSS RISK SA': 'BARBUSS',
+    'HDI': 'BARBUSS',                        // HDI ahora es BARBUSS
     'FEDERACION PATRONAL': 'FEDERACION PATRONAL',
     'PATRONAL': 'FEDERACION PATRONAL',
     'GALICIA SEGUROS': 'GALICIA SEGUROS',
     'GALICIA': 'GALICIA SEGUROS',
+    'SURA': 'GALICIA SEGUROS',               // SURA ahora es GALICIA SEGUROS
     'MERCANTIL ANDINA': 'MERCANTIL ANDINA',
     'LA MERCANTIL ANDINA': 'MERCANTIL ANDINA',
     'SMG ART': 'SMG ART',
@@ -45,8 +49,7 @@ function mapearCompania(nombre) {
     return COMPANY_MAP[nombre.toUpperCase().trim()] || null;
 }
 
-const ALICUOTA_PROPIA   = 3.5;
-const ALICUOTA_SIRCREB  = 4.5;
+const ALICUOTA_PROPIA = 3.5;
 
 // ─────────────────────────────────────────────
 // PARSER: PDF → base64 → Gemini AI
@@ -127,31 +130,34 @@ export default function IIBBLiquidacion() {
     const [errores, setErrores]         = useState([]);
     const [editId, setEditId]           = useState(null);
     const [editData, setEditData]       = useState({});
-    const [facturacion, setFacturacion] = useState('');
+    const [comisionesBrutas, setComisionesBrutas] = useState(
+        () => localStorage.getItem('iibb_comisiones_brutas') || ''
+    );
+    const [alicuotaBanco, setAlicuotaBanco] = useState(
+        () => parseFloat(localStorage.getItem('iibb_alicuota_banco') || '4.5')
+    );
     const [sircrebResult, setSircrebResult] = useState(null);
     const fileInputRef = useRef(null);
 
     // Persistencia automática
-    useEffect(() => {
-        localStorage.setItem('iibb_retenciones', JSON.stringify(retenciones));
-    }, [retenciones]);
+    useEffect(() => { localStorage.setItem('iibb_retenciones',      JSON.stringify(retenciones));  }, [retenciones]);
+    useEffect(() => { localStorage.setItem('iibb_checklist',         JSON.stringify(checklist));    }, [checklist]);
+    useEffect(() => { localStorage.setItem('iibb_comisiones_brutas', comisionesBrutas);             }, [comisionesBrutas]);
+    useEffect(() => { localStorage.setItem('iibb_alicuota_banco',    String(alicuotaBanco));        }, [alicuotaBanco]);
 
-    useEffect(() => {
-        localStorage.setItem('iibb_checklist', JSON.stringify(checklist));
-    }, [checklist]);
-
-    const totalChecked = Object.values(checklist).filter(Boolean).length;
-    const totalMonto   = retenciones.reduce((s, r) => s + (parseFloat(r.monto) || 0), 0);
-    const total901     = retenciones.filter(r => r.jurisdiccion === '901').reduce((s, r) => s + (parseFloat(r.monto) || 0), 0);
-    const total902     = retenciones.filter(r => r.jurisdiccion === '902').reduce((s, r) => s + (parseFloat(r.monto) || 0), 0);
+    const checklistKeys  = Object.keys(checklist);
+    const totalChecked   = Object.values(checklist).filter(Boolean).length;
+    const totalMonto     = retenciones.reduce((s, r) => s + (parseFloat(r.monto) || 0), 0);
+    const total901       = retenciones.filter(r => r.jurisdiccion === '901').reduce((s, r) => s + (parseFloat(r.monto) || 0), 0);
+    const total902       = retenciones.filter(r => r.jurisdiccion === '902').reduce((s, r) => s + (parseFloat(r.monto) || 0), 0);
 
     const toggleCheck = (company) => {
         setChecklist(prev => ({ ...prev, [company]: !prev[company] }));
     };
 
     const toggleAll = () => {
-        const allChecked = totalChecked === COMPANIES.length;
-        setChecklist(Object.fromEntries(COMPANIES.map(c => [c, !allChecked])));
+        const allChecked = totalChecked === checklistKeys.length;
+        setChecklist(prev => Object.fromEntries(checklistKeys.map(c => [c, !allChecked])));
     };
 
     const handleDrop = useCallback(async (e) => {
@@ -179,16 +185,19 @@ export default function IIBBLiquidacion() {
             }
         }
         setRetenciones(prev => [...prev, ...nuevos]);
-        // Auto-check las compañías detectadas en el checklist
+        // Auto-check y auto-agregar compañías detectadas
         if (nuevos.length) {
-            const companias = [...new Set(nuevos.map(r => mapearCompania(r.compania)).filter(Boolean))];
-            if (companias.length) {
-                setChecklist(prev => {
-                    const next = { ...prev };
-                    companias.forEach(c => { if (c in next) next[c] = true; });
-                    return next;
+            setChecklist(prev => {
+                const next = { ...prev };
+                nuevos.forEach(r => {
+                    const mapped = mapearCompania(r.compania);
+                    const key = mapped || r.compania?.toUpperCase().trim();
+                    if (!key) return;
+                    if (!(key in next)) next[key] = false; // nueva compañía → agregar sin marcar
+                    if (mapped) next[key] = true;          // conocida → marcar como descargada
                 });
-            }
+                return next;
+            });
             setTab('retenciones');
         }
         setErrores(errs);
@@ -212,10 +221,10 @@ export default function IIBBLiquidacion() {
     const cancelarEdicion = () => { setEditId(null); setEditData({}); };
 
     const calcularSircreb = () => {
-        const fb = parseFloat(facturacion.replace(/\./g, '').replace(',', '.'));
+        const fb = parseFloat(comisionesBrutas.replace(/\./g, '').replace(',', '.'));
         if (!fb || fb <= 0) return;
         const determinado = fb * ALICUOTA_PROPIA / 100;
-        const sircreb     = fb * ALICUOTA_SIRCREB / 100;
+        const sircreb     = fb * alicuotaBanco / 100;
         const totalConSircreb = totalMonto + sircreb;
         setSircrebResult({
             facturacion: fb,
@@ -300,7 +309,7 @@ export default function IIBBLiquidacion() {
                                         Descarga de certificados
                                     </p>
                                     <p className="text-xs font-bold mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                                        {totalChecked} de {COMPANIES.length} compañías descargadas
+                                        {totalChecked} de {checklistKeys.length} compañías descargadas
                                     </p>
                                 </div>
                                 <button
@@ -308,8 +317,45 @@ export default function IIBBLiquidacion() {
                                     className="px-4 py-2 rounded-xl border border-[var(--border-color)] text-[10px] font-black uppercase tracking-widest hover:bg-white/5 transition-all"
                                     style={{ color: 'var(--text-secondary)' }}
                                 >
-                                    {totalChecked === COMPANIES.length ? 'Desmarcar Todo' : 'Marcar Todo'}
+                                    {totalChecked === checklistKeys.length ? 'Desmarcar Todo' : 'Marcar Todo'}
                                 </button>
+                            </div>
+
+                            {/* Comisiones brutas del mes */}
+                            <div className="px-6 py-4 border-b border-[var(--border-color)] flex flex-col md:flex-row gap-4 items-start md:items-center">
+                                <div className="flex-1">
+                                    <label className="text-[9px] font-black uppercase tracking-widest block mb-1.5" style={{ color: 'var(--text-secondary)' }}>
+                                        Comisiones brutas del mes
+                                    </label>
+                                    <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-[var(--border-color)] bg-white/5 max-w-xs">
+                                        <span className="font-black text-sm" style={{ color: 'var(--text-secondary)' }}>$</span>
+                                        <input
+                                            type="text"
+                                            value={comisionesBrutas}
+                                            onChange={e => { setComisionesBrutas(e.target.value); setSircrebResult(null); }}
+                                            placeholder="0,00"
+                                            className="flex-1 bg-transparent outline-none font-black text-sm"
+                                            style={{ color: 'var(--text-color)' }}
+                                        />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="text-[9px] font-black uppercase tracking-widest block mb-1.5" style={{ color: 'var(--text-secondary)' }}>
+                                        Alícuota banco (SIRCREB)
+                                    </label>
+                                    <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-amber-500/30 bg-amber-500/5 w-32">
+                                        <input
+                                            type="number"
+                                            step="0.1"
+                                            min="0"
+                                            max="10"
+                                            value={alicuotaBanco}
+                                            onChange={e => { setAlicuotaBanco(parseFloat(e.target.value) || 0); setSircrebResult(null); }}
+                                            className="flex-1 bg-transparent outline-none font-black text-sm text-amber-400 w-12"
+                                        />
+                                        <span className="font-black text-sm text-amber-400">%</span>
+                                    </div>
+                                </div>
                             </div>
 
                             {/* Barra de progreso */}
@@ -318,14 +364,14 @@ export default function IIBBLiquidacion() {
                                     <motion.div
                                         className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-purple-500"
                                         initial={{ width: 0 }}
-                                        animate={{ width: `${(totalChecked / COMPANIES.length) * 100}%` }}
+                                        animate={{ width: checklistKeys.length ? `${(totalChecked / checklistKeys.length) * 100}%` : '0%' }}
                                         transition={{ duration: 0.4 }}
                                     />
                                 </div>
                             </div>
 
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-0">
-                                {COMPANIES.map((company, idx) => (
+                                {checklistKeys.map((company, idx) => (
                                     <motion.button
                                         key={company}
                                         onClick={() => toggleCheck(company)}
@@ -347,7 +393,7 @@ export default function IIBBLiquidacion() {
                                 ))}
                             </div>
 
-                            {totalChecked === COMPANIES.length && (
+                            {checklistKeys.length > 0 && totalChecked === checklistKeys.length && (
                                 <motion.div
                                     initial={{ opacity: 0, y: 10 }}
                                     animate={{ opacity: 1, y: 0 }}
@@ -603,21 +649,21 @@ export default function IIBBLiquidacion() {
                                 <div className="px-6 py-4 border-b border-[var(--border-color)]">
                                     <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: 'var(--text-secondary)' }}>Control SIRCREB</p>
                                     <p className="text-[10px] font-bold mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                                        Compara retenciones acumuladas vs. tu alícuota propia (3.5%)
+                                        Compara retenciones acumuladas vs. tu alícuota propia ({ALICUOTA_PROPIA}%)
                                     </p>
                                 </div>
                                 <div className="p-6 space-y-4">
                                     <div className="flex gap-3">
                                         <div className="flex-1">
                                             <label className="text-[9px] font-black uppercase tracking-widest block mb-2" style={{ color: 'var(--text-secondary)' }}>
-                                                Facturación bruta del período
+                                                Comisiones brutas del período
                                             </label>
                                             <div className="flex items-center gap-2 px-4 py-3 rounded-2xl border border-[var(--border-color)] bg-white/5">
                                                 <span className="text-sm font-black" style={{ color: 'var(--text-secondary)' }}>$</span>
                                                 <input
                                                     type="text"
-                                                    value={facturacion}
-                                                    onChange={e => { setFacturacion(e.target.value); setSircrebResult(null); }}
+                                                    value={comisionesBrutas}
+                                                    onChange={e => { setComisionesBrutas(e.target.value); setSircrebResult(null); }}
                                                     placeholder="0,00"
                                                     className="flex-1 bg-transparent outline-none font-black text-sm"
                                                     style={{ color: 'var(--text-color)' }}
@@ -650,7 +696,7 @@ export default function IIBBLiquidacion() {
                                                         { label: 'Facturación bruta', val: sircrebResult.facturacion, color: 'var(--text-color)' },
                                                         { label: `Impuesto det. (${ALICUOTA_PROPIA}%)`, val: sircrebResult.determinado, color: 'var(--text-color)' },
                                                         { label: 'Retenciones compañías', val: totalMonto, color: 'var(--text-color)' },
-                                                        { label: `SIRCREB est. (${ALICUOTA_SIRCREB}%)`, val: sircrebResult.sircreb, color: 'var(--text-color)' },
+                                                        { label: `Banco SIRCREB (${alicuotaBanco}%)`, val: sircrebResult.sircreb, color: 'var(--text-color)' },
                                                         { label: 'Total retenciones + SIRCREB', val: sircrebResult.totalConSircreb, color: sircrebResult.alarma ? '#f87171' : '#34d399', bold: true },
                                                     ].map(item => (
                                                         <div key={item.label} className="flex justify-between items-center py-1 border-b border-white/10">
