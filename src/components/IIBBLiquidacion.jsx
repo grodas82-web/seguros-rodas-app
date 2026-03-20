@@ -5,6 +5,7 @@ import {
     CheckCircle, XCircle, Trash2, Edit3, Save, X, RefreshCw, Calculator, Sparkles
 } from 'lucide-react';
 import { analyzeIIBBCertificate } from '../services/aiManager';
+import { useAppContext } from '../context/AppContext';
 
 // ─────────────────────────────────────────────
 // CONSTANTES
@@ -111,6 +112,7 @@ function descargarArchivo(contenido, nombre) {
 // ─────────────────────────────────────────────
 
 export default function IIBBLiquidacion() {
+    const { invoices = [] } = useAppContext();
     const [tab, setTab]           = useState('checklist');
     const [checklist, setChecklist] = useState(() => {
         try {
@@ -130,9 +132,6 @@ export default function IIBBLiquidacion() {
     const [errores, setErrores]         = useState([]);
     const [editId, setEditId]           = useState(null);
     const [editData, setEditData]       = useState({});
-    const [comisionesBrutas, setComisionesBrutas] = useState(
-        () => localStorage.getItem('iibb_comisiones_brutas') || ''
-    );
     const [alicuotaBanco, setAlicuotaBanco] = useState(
         () => parseFloat(localStorage.getItem('iibb_alicuota_banco') || '4.5')
     );
@@ -140,10 +139,31 @@ export default function IIBBLiquidacion() {
     const fileInputRef = useRef(null);
 
     // Persistencia automática
-    useEffect(() => { localStorage.setItem('iibb_retenciones',      JSON.stringify(retenciones));  }, [retenciones]);
-    useEffect(() => { localStorage.setItem('iibb_checklist',         JSON.stringify(checklist));    }, [checklist]);
-    useEffect(() => { localStorage.setItem('iibb_comisiones_brutas', comisionesBrutas);             }, [comisionesBrutas]);
-    useEffect(() => { localStorage.setItem('iibb_alicuota_banco',    String(alicuotaBanco));        }, [alicuotaBanco]);
+    useEffect(() => { localStorage.setItem('iibb_retenciones',   JSON.stringify(retenciones)); }, [retenciones]);
+    useEffect(() => { localStorage.setItem('iibb_checklist',      JSON.stringify(checklist));   }, [checklist]);
+    useEffect(() => { localStorage.setItem('iibb_alicuota_banco', String(alicuotaBanco));       }, [alicuotaBanco]);
+
+    // Comisiones brutas del mes en curso — suma automática desde Historial de Facturas
+    const mesActual = new Date();
+    const comisionesDelMes = invoices.reduce((sum, inv) => {
+        if (!inv.date) return sum;
+        let m, y;
+        if (String(inv.date).includes('/')) {
+            const parts = inv.date.split('/');
+            // DD/MM/YYYY
+            m = parseInt(parts[1], 10) - 1;
+            y = parseInt(parts[2], 10);
+        } else {
+            // YYYY-MM-DD
+            const d = new Date(inv.date);
+            m = d.getMonth(); y = d.getFullYear();
+        }
+        if (m === mesActual.getMonth() && y === mesActual.getFullYear()) {
+            return sum + (Number(inv.amount) || 0);
+        }
+        return sum;
+    }, 0);
+    const mesLabel = mesActual.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' });
 
     const checklistKeys  = Object.keys(checklist);
     const totalChecked   = Object.values(checklist).filter(Boolean).length;
@@ -221,7 +241,7 @@ export default function IIBBLiquidacion() {
     const cancelarEdicion = () => { setEditId(null); setEditData({}); };
 
     const calcularSircreb = () => {
-        const fb = parseFloat(comisionesBrutas.replace(/\./g, '').replace(',', '.'));
+        const fb = comisionesDelMes;
         if (!fb || fb <= 0) return;
         const determinado = fb * ALICUOTA_PROPIA / 100;
         const sircreb     = fb * alicuotaBanco / 100;
@@ -321,23 +341,18 @@ export default function IIBBLiquidacion() {
                                 </button>
                             </div>
 
-                            {/* Comisiones brutas del mes */}
+                            {/* Comisiones brutas del mes — automático desde Historial */}
                             <div className="px-6 py-4 border-b border-[var(--border-color)] flex flex-col md:flex-row gap-4 items-start md:items-center">
                                 <div className="flex-1">
-                                    <label className="text-[9px] font-black uppercase tracking-widest block mb-1.5" style={{ color: 'var(--text-secondary)' }}>
-                                        Comisiones brutas del mes
-                                    </label>
-                                    <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-[var(--border-color)] bg-white/5 max-w-xs">
-                                        <span className="font-black text-sm" style={{ color: 'var(--text-secondary)' }}>$</span>
-                                        <input
-                                            type="text"
-                                            value={comisionesBrutas}
-                                            onChange={e => { setComisionesBrutas(e.target.value); setSircrebResult(null); }}
-                                            placeholder="0,00"
-                                            className="flex-1 bg-transparent outline-none font-black text-sm"
-                                            style={{ color: 'var(--text-color)' }}
-                                        />
-                                    </div>
+                                    <p className="text-[9px] font-black uppercase tracking-widest mb-1" style={{ color: 'var(--text-secondary)' }}>
+                                        Comisiones brutas · {mesLabel}
+                                    </p>
+                                    <p className="text-2xl font-black" style={{ color: comisionesDelMes > 0 ? 'var(--text-color)' : 'var(--text-secondary)' }}>
+                                        $ {comisionesDelMes.toLocaleString('es-AR', { minimumFractionDigits: 2 })}
+                                    </p>
+                                    <p className="text-[9px] mt-1" style={{ color: 'var(--text-secondary)' }}>
+                                        Suma automática de facturas del mes en curso
+                                    </p>
                                 </div>
                                 <div>
                                     <label className="text-[9px] font-black uppercase tracking-widest block mb-1.5" style={{ color: 'var(--text-secondary)' }}>
@@ -656,18 +671,15 @@ export default function IIBBLiquidacion() {
                                     <div className="flex gap-3">
                                         <div className="flex-1">
                                             <label className="text-[9px] font-black uppercase tracking-widest block mb-2" style={{ color: 'var(--text-secondary)' }}>
-                                                Comisiones brutas del período
+                                                Comisiones brutas · {mesLabel}
                                             </label>
                                             <div className="flex items-center gap-2 px-4 py-3 rounded-2xl border border-[var(--border-color)] bg-white/5">
                                                 <span className="text-sm font-black" style={{ color: 'var(--text-secondary)' }}>$</span>
-                                                <input
-                                                    type="text"
-                                                    value={comisionesBrutas}
-                                                    onChange={e => { setComisionesBrutas(e.target.value); setSircrebResult(null); }}
-                                                    placeholder="0,00"
-                                                    className="flex-1 bg-transparent outline-none font-black text-sm"
-                                                    style={{ color: 'var(--text-color)' }}
-                                                />
+                                                <span className="flex-1 font-black text-sm" style={{ color: comisionesDelMes > 0 ? 'var(--text-color)' : 'var(--text-secondary)' }}>
+                                                    {comisionesDelMes > 0
+                                                        ? comisionesDelMes.toLocaleString('es-AR', { minimumFractionDigits: 2 })
+                                                        : 'Sin facturas del mes'}
+                                                </span>
                                             </div>
                                         </div>
                                         <button
@@ -693,7 +705,7 @@ export default function IIBBLiquidacion() {
                                             >
                                                 <div className="grid grid-cols-2 gap-3 text-[11px]">
                                                     {[
-                                                        { label: 'Facturación bruta', val: sircrebResult.facturacion, color: 'var(--text-color)' },
+                                                        { label: `Comisiones brutas ${mesLabel}`, val: sircrebResult.facturacion, color: 'var(--text-color)' },
                                                         { label: `Impuesto det. (${ALICUOTA_PROPIA}%)`, val: sircrebResult.determinado, color: 'var(--text-color)' },
                                                         { label: 'Retenciones compañías', val: totalMonto, color: 'var(--text-color)' },
                                                         { label: `Banco SIRCREB (${alicuotaBanco}%)`, val: sircrebResult.sircreb, color: 'var(--text-color)' },
