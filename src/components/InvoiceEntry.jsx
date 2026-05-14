@@ -10,9 +10,29 @@ const formatARS = (raw) => {
 };
 
 const parseARS = (str) => {
-    // "1.234,56" → 1234.56
-    const clean = String(str || '').replace(/\./g, '').replace(',', '.');
-    const n = parseFloat(clean);
+    const s = String(str || '').trim();
+    if (!s) return 0;
+
+    const hasDot   = s.includes('.');
+    const hasComma = s.includes(',');
+
+    let normalized;
+    if (hasDot && hasComma) {
+        // "27.905,73"  → punto = miles, coma = decimal
+        normalized = s.replace(/\./g, '').replace(',', '.');
+    } else if (hasComma && !hasDot) {
+        // "27905,73"   → coma = decimal
+        normalized = s.replace(',', '.');
+    } else if (hasDot && !hasComma) {
+        // "27905.73"   → si hay ≤2 dígitos tras el último punto → decimal
+        // "27.905"     → 3 dígitos tras el punto → miles
+        const afterLastDot = s.split('.').pop();
+        normalized = afterLastDot.length <= 2 ? s : s.replace(/\./g, '');
+    } else {
+        normalized = s;
+    }
+
+    const n = parseFloat(normalized);
     return isNaN(n) ? 0 : n;
 };
 
