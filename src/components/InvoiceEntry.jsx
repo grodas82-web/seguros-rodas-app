@@ -4,8 +4,10 @@ import { Save, RefreshCcw, Landmark, CreditCard, Hash, DollarSign, Calendar, Plu
 
 // ─── Formato pesos argentinos ─────────────────────────────────────────────────
 const formatARS = (raw) => {
-    const num = parseFloat(String(raw).replace(/\./g, '').replace(',', '.'));
-    if (isNaN(num) || raw === '' || raw === undefined) return '';
+    if (raw === '' || raw === null || raw === undefined) return '';
+    // Si ya es número JS, formatear directo. Si es string ARS, parsear primero.
+    const num = typeof raw === 'number' ? raw : parseARS(String(raw));
+    if (isNaN(num)) return '';
     return num.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
