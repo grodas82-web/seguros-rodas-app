@@ -159,7 +159,8 @@ const InvoiceEntry = ({ onFinish }) => {
                 'Factura B': 6,
                 'Factura C': 11,
                 'Nota Crédito A': 3,
-                'Nota Crédito B': 8
+                'Nota Crédito B': 8,
+                'Nota Crédito C': 13
             };
             const res = await window.electron.afipGetLastVoucher({
                 pos: formData.pointOfSale,
@@ -220,7 +221,8 @@ const InvoiceEntry = ({ onFinish }) => {
                     'Factura B': 6,
                     'Factura C': 11,
                     'Nota Crédito A': 3,
-                    'Nota Crédito B': 8
+                    'Nota Crédito B': 8,
+                    'Nota Crédito C': 13
                 };
                 const afipDataPayload = {
                     ...formData,
@@ -408,6 +410,7 @@ const InvoiceEntry = ({ onFinish }) => {
                                     <option>Factura C</option>
                                     <option>Nota Crédito A</option>
                                     <option>Nota Crédito B</option>
+                                    <option>Nota Crédito C</option>
                                 </select>
                             </div>
                         </div>
