@@ -1,13 +1,14 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
     Users, Car, FileText, Upload, Search, Loader2,
     DollarSign, Cpu, Edit2, Trash2, X, Save, RefreshCw, Zap, CheckSquare, Square, AlertTriangle, Building2, ListFilter,
     FileWarning, Check, History, User, PlusCircle, MinusCircle, ChevronLeft, ChevronRight, ShieldCheck, Percent, Activity,
-    Eye, Download, DownloadCloud
+    Eye, Download, DownloadCloud, ShieldAlert, Clock, ArrowRightLeft, Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAppContext } from '../context/AppContext';
 import { saveFileChunks, loadFileChunks, isChunkedAttachment } from '../utils/fileChunks';
+import { RAMOS_RENOVACION, calcularInflacionAcumulada, aplicarInflacion } from '../utils/inflacion';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -46,17 +47,21 @@ const PolicyManager = () => {
         clearAllPolicies,
         unifyExistingPolicies,
         mergeClientsByName,
+        runAssignClientIds,
         bulkAddPolicies,
         bulkDeletePolicies,
         processCSVWithAI,
         analyzePolicyWithAI,
+        processFileWithAI,
         globalSearchTerm,
         showOnlyMissingFiles,
         setShowOnlyMissingFiles,
         isAutoExpired,
         normalizeRisk,
         totalClientsCount,
-        loading
+        loading,
+        quotaLock,
+        triggerQuotaLock
     } = useAppContext();
 
     const [searchTerm, setSearchTerm] = useState((globalSearchTerm || '').trim());
@@ -64,6 +69,7 @@ const PolicyManager = () => {
     const [filterCompany, setFilterCompany] = useState('All');
     const [filterAttachment, setFilterAttachment] = useState('All'); // 'All', 'WithFile', 'WithoutFile'
     const [filterStatus, setFilterStatus] = useState('Active'); // 'All', 'Active', 'Expired'
+    const [filterCurrency, setFilterCurrency] = useState('All'); // 'All', 'USD', 'ARS'
     const [isProcessing, setIsProcessing] = useState(false);
     const [progress, setProgress] = useState({ message: '', percent: 0 });
     const [selectedIds, setSelectedIds] = useState([]);
@@ -95,6 +101,33 @@ const PolicyManager = () => {
     useEffect(() => {
         localStorage.setItem('policyTableWidths_v2', JSON.stringify(colWidths));
     }, [colWidths]);
+
+    // --- Saneador Automático de Moneda (USD Hallucination Fix) ---
+    useEffect(() => {
+        if (!policies || policies.length === 0) return;
+        
+        const fixUSDPolicies = async () => {
+            // Si una póliza dice ser USD pero su prima es > 15,000, es 99.9% seguro que es ARS y la IA alucinó "USD".
+            const badPolicies = policies.filter(p => p.currency === 'USD' && Number(p?.prima) > 15000 && !p.isCancelled);
+            if (badPolicies.length > 0) {
+                console.warn(`🧹 [AUTO-FIX] Encontradas ${badPolicies.length} pólizas USD con montos irreales (>15k). Convirtiendo a ARS...`);
+                for (const p of badPolicies) {
+                    try {
+                        await updatePolicy(p.id, { currency: 'ARS' });
+                    } catch (e) {
+                        console.error('Error auto-fixing policy:', e);
+                    }
+                }
+                console.log('✅ Corrección automática de moneda USD completada en la base de datos.');
+            }
+        };
+
+        const hasRun = sessionStorage.getItem('usd_hallucination_fix_run');
+        if (!hasRun) {
+            sessionStorage.setItem('usd_hallucination_fix_run', 'true');
+            fixUSDPolicies();
+        }
+    }, [policies, updatePolicy]);
 
     const adjustWidth = (col, amount) => {
         setColWidths(prev => ({
@@ -133,19 +166,18 @@ const PolicyManager = () => {
     const abbreviateCompany = (name) => {
         if (!name) return '';
         const upper = name.toUpperCase();
+        if (upper.includes('ASOCIART')) return 'ASOCIART';
         if (upper.includes('MERCANTIL ANDINA')) return 'Mercantil';
         if (upper.includes('FEDERA')) return 'Federación';
         if (upper.includes('ACS COMERCIAL') || upper.includes('GALICIA') || upper.includes('1276')) return 'Galicia';
         if (upper.includes('ALLIANZ')) return 'Allianz';
+        if (upper.includes('SWISS MEDICAL ART') || upper.includes('SMG ART')) return 'SMG ART';
         if (upper.includes('SMG') || upper.includes('SWISS MEDICAL') || upper.includes('COMPANIA ARGENTINA DE SEGUROS') || upper.includes('COMPAÑIA ARGENTINA DE SEGUROS')) return 'SMG Seguros';
-        if (upper.includes('SWISS MEDICAL SEGUROS')) return 'SMG Seguros';
-        if (upper.includes('SWISS MEDICAL ART')) return 'SMG ART';
-        if (upper.includes('SMG SEGUROS')) return 'SMG Seguros';
-        if (upper.includes('SMG ART')) return 'SMG ART';
         if (upper.includes('ZURICH')) return 'Zurich';
         if (upper.includes('LA MERIDIONAL') || upper.includes('MERIDIONAL')) return 'Meridional Seguros';
         if (upper.includes('EXPERTA ART')) return 'EXPERTA ART';
         if (upper.includes('EXPERTA')) return 'EXPERTA SEGUROS';
+        if (upper.includes('BARBUSS')) return 'BARBUSS RISK SA';
         return name;
     };
 
@@ -192,6 +224,27 @@ const PolicyManager = () => {
     const [isCancellationModalOpen, setIsCancellationModalOpen] = useState(false);
     const [editingPolicy, setEditingPolicy] = useState(null);
     const [isSaving, setIsSaving] = useState(false);
+    const [isReanalizingAI, setIsReanalizingAI] = useState(false);
+
+    // Estado para el modal de Cambio de Compañía
+    const [isCambioCompaniaModalOpen, setIsCambioCompaniaModalOpen] = useState(false);
+    const [cambioCompaniaFile, setCambioCompaniaFile] = useState(null);
+    const [cambioCompaniaProgress, setCambioCompaniaProgress] = useState({ message: '', percent: 0 });
+    const [cambioCompaniaResult, setCambioCompaniaResult] = useState(null); // datos extraídos por IA
+    const [isCambioCompaniaProcessing, setIsCambioCompaniaProcessing] = useState(false);
+    const [isCambioCompaniaConfirming, setIsCambioCompaniaConfirming] = useState(false);
+    const cambioCompaniaFileRef = useRef(null);
+    // Carrusel multi-póliza
+    const [modalClientPolicies, setModalClientPolicies] = useState([]);
+    const [modalPolicyIndex, setModalPolicyIndex] = useState(0);
+
+    // Helper: obtiene el subtipo de póliza (compatible con registros viejos que solo tienen isRenewal)
+    const getPolicySubtype = (pol) => {
+        if (!pol) return 'Nuevo Negocio';
+        if (pol.policySubtype) return pol.policySubtype;
+        if (pol.isRenewal) return 'Renovación';
+        return 'Nuevo Negocio';
+    };
 
     // Formateo de Moneda ARS/USD
     const formatCurrency = (value, currency = 'ARS') => {
@@ -223,13 +276,15 @@ const PolicyManager = () => {
     // Resetear a página 1 cuando cambian los filtros
     useEffect(() => {
         setCurrentPage(1);
-    }, [searchTerm, filterCompany, filterRisk, filterAttachment, filterStatus, showOnlyMissingFiles]);
+    }, [searchTerm, filterCompany, filterRisk, filterAttachment, filterStatus, filterCurrency, showOnlyMissingFiles]);
 
     // Cerrar modal con tecla ESC
     useEffect(() => {
         const handleKeyDown = (e) => {
             if (e.key === 'Escape' && isModalOpen && !isSaving) {
                 setIsModalOpen(false);
+                setModalClientPolicies([]);
+                setModalPolicyIndex(0);
             }
         };
         window.addEventListener('keydown', handleKeyDown);
@@ -249,7 +304,7 @@ const PolicyManager = () => {
             companies: []
         };
 
-        const activePolicies = policies.filter(p => !p?.isCancelled && !isAutoExpired(p));
+        const activePolicies = policies.filter(p => !p?.isCancelled && !isAutoExpired(p) && !p?.policySubtype?.startsWith('Endoso'));
         const cancelledPolicies = policies.filter(p => p?.isCancelled || (p && isAutoExpired(p)));
 
         // Conteo robusto de clientes únicos usando DNI o Nombre como identificador
@@ -338,9 +393,13 @@ const PolicyManager = () => {
                     matchesStatus = expired && !cancelled;
                 } else if (filterStatus === 'Cancelled') {
                     matchesStatus = cancelled;
+                } else if (filterStatus === 'Latest') {
+                    matchesStatus = true; // El filtro "Últimas Subidas" muestra todo, ordenado por fecha
                 }
 
-                const result = matchesSearch && matchesRisk && matchesCompany && matchesAttachment && matchesMissingFilter && matchesStatus;
+                const matchesCurrency = filterCurrency === 'All' || p.currency === filterCurrency || (filterCurrency === 'ARS' && !p.currency);
+
+                const result = matchesSearch && matchesRisk && matchesCompany && matchesAttachment && matchesMissingFilter && matchesStatus && matchesCurrency;
 
                 // 🛑 DEBUG AVANZADO: Solo para casos reportados
                 if (p.clientName?.toUpperCase().includes('GIL') || p.clientName?.toUpperCase().includes('OLIVARES')) {
@@ -372,6 +431,13 @@ const PolicyManager = () => {
                 return result;
             })
             .sort((a, b) => {
+                // 0. Si el filtro es "Últimas Subidas", ordenamos estrictamente por timestamp
+                if (filterStatus === 'Latest') {
+                    const timeA = (a.timestamp?.toMillis ? a.timestamp.toMillis() : new Date(a.timestamp || 0).getTime()) || 0;
+                    const timeB = (b.timestamp?.toMillis ? b.timestamp.toMillis() : new Date(b.timestamp || 0).getTime()) || 0;
+                    return timeB - timeA;
+                }
+
                 // 1. Canceladas abajo del todo
                 if (a.isCancelled && !b.isCancelled) return 1;
                 if (!a.isCancelled && b.isCancelled) return -1;
@@ -398,21 +464,29 @@ const PolicyManager = () => {
 
                 return 0;
             });
-    }, [policies, searchTerm, filterRisk, filterCompany, filterAttachment, filterStatus, showOnlyMissingFiles]);
+    }, [policies, searchTerm, filterRisk, filterCompany, filterAttachment, filterStatus, filterCurrency, showOnlyMissingFiles]);
 
     const groupedPolicies = useMemo(() => {
         const groups = {};
         filteredPolicies.forEach(pol => {
-            const key = pol.dni || pol.clientName;
+            // Prioridad: clientId persistente → dni → clientName (fallback para pólizas sin migrar)
+            const key = pol.clientId || pol.dni || pol.clientName;
             if (!groups[key]) {
                 groups[key] = {
                     id: key,
+                    clientId: pol.clientId || null,
                     clientName: pol.clientName,
                     dni: pol.dni,
                     policies: [],
                     latestTimestamp: 0
                 };
             }
+            // Actualizar nombre/dni con el valor más reciente del grupo
+            if (pol.clientName && (!groups[key].clientName || pol.clientName.length > groups[key].clientName.length)) {
+                groups[key].clientName = pol.clientName;
+            }
+            if (pol.dni && !groups[key].dni) groups[key].dni = pol.dni;
+            if (pol.clientId && !groups[key].clientId) groups[key].clientId = pol.clientId;
             groups[key].policies.push(pol);
 
             // Extraer timestamp numérico para ordenar con máxima robustez
@@ -438,6 +512,10 @@ const PolicyManager = () => {
         // Orden: Primero los que tienen al menos una póliza activa/vigente
         // Luego por latestTimestamp (lo más reciente arriba)
         return Object.values(groups).sort((a, b) => {
+            if (filterStatus === 'Latest') {
+                return b.latestTimestamp - a.latestTimestamp;
+            }
+
             const now = new Date();
             const aHasActive = a.policies.some(p => !p.isCancelled && !isAutoExpired(p));
             const bHasActive = b.policies.some(p => !p.isCancelled && !isAutoExpired(p));
@@ -496,7 +574,8 @@ const PolicyManager = () => {
                 await bulkDeletePolicies(selectedIds);
                 setSelectedIds([]);
             } catch (error) {
-                alert("Error al eliminar pólizas");
+                console.error('Error en bulkDelete:', error);
+                alert(`Error al eliminar pólizas: ${error?.message || 'Permiso denegado o sin conexión'}`);
             } finally {
                 setIsProcessing(false);
                 setProgress({ message: '', percent: 0 });
@@ -539,20 +618,38 @@ const PolicyManager = () => {
     };
 
     const handleMergeClients = async () => {
-        if (window.confirm("Esta función analizará clientes con exactamente el mismo nombre pero con distintos DNI/CUIT (ej: DNI vs CUIT largo) y les asignará el mismo identificador óptimo a todos. ¿Deseas proceder?")) {
+        if (window.confirm("Unificará clientes por nombre normalizado (JUAN PEREZ = PEREZ JUAN) y asignará un ID único a cada uno. ¿Deseas proceder?")) {
             setIsProcessing(true);
-            setProgress({ message: 'Buscando clientes para fusionar...', percent: 40 });
+            setProgress({ message: 'Unificando clientes por nombre...', percent: 20 });
             try {
                 const result = await mergeClientsByName();
                 if (result.mergedClients > 0) {
-                    alert(`✅ Fusión de Clientes Exitosa: \n - Se detectaron equivalencias en ${result.mergedClients} clientes distintos.\n - Se corrigió el DNI/CUIT en ${result.modifiedPolicies} pólizas para unificarlos en su cuenta principal.`);
+                    alert(`✅ Unificación exitosa:\n - ${result.mergedClients} grupos de clientes procesados.\n - ${result.modifiedPolicies} pólizas actualizadas.`);
                 } else {
-                    alert("No se encontraron clientes homónimos con distinto DNI/CUIT para fusionar. Tu base de datos está limpia en este aspecto.");
+                    alert("No se encontraron clientes para unificar. La base ya está limpia.");
                 }
                 setSelectedIds([]);
             } catch (error) {
-                console.error("Error al fusionar clientes:", error);
-                alert(`❌ Error técnico al fusionar clientes: ${error.message || 'Error desconocido'}`);
+                console.error("Error al unificar clientes:", error);
+                alert(`❌ Error: ${error.message || 'Error desconocido'}`);
+            } finally {
+                setIsProcessing(false);
+                setProgress({ message: '', percent: 0 });
+            }
+        }
+    };
+
+    const handleAssignClientIds = async () => {
+        if (window.confirm("Asignará un ID único a cada cliente en todas las pólizas. Las pólizas ya procesadas se omiten. ¿Continuar?")) {
+            setIsProcessing(true);
+            try {
+                const result = await runAssignClientIds((percent, done, total) => {
+                    setProgress({ message: `Procesando pólizas... ${done}/${total}`, percent });
+                });
+                alert(`✅ IDs asignados:\n - ${result.processed} pólizas actualizadas.\n - ${result.skipped} ya tenían ID (omitidas).\n - Total: ${result.total} pólizas.`);
+            } catch (error) {
+                console.error("Error al asignar IDs de cliente:", error);
+                alert(`❌ Error: ${error.message || 'Error desconocido'}`);
             } finally {
                 setIsProcessing(false);
                 setProgress({ message: '', percent: 0 });
@@ -576,9 +673,9 @@ const PolicyManager = () => {
                 const displayIndex = i + 1;
                 const total = files.length;
 
-                // Pausa anti-rate-limit entre archivos (excepto el primero)
+                // Pausa anti-rate-limit entre archivos (excepto el primero) - J&L 5s Rule
                 if (i > 0) {
-                    for (let s = 3; s > 0; s--) {
+                    for (let s = 5; s > 0; s--) {
                         setProgress({
                             message: `⏳ Esperando ${s}s antes de archivo ${displayIndex}/${total} (evitar límite IA)...`,
                             percent: Math.round((i / total) * 100)
@@ -601,51 +698,78 @@ const PolicyManager = () => {
 
                     if (result.status === 'success') {
                         successCount++;
+                        const companyUpper = (result.data?.company || '').toUpperCase();
+                        const riskType = result.data?.riskType || '';
+                        const isMercantilIntegralResult = (companyUpper.includes('MERCANTIL') || companyUpper.includes('ANDINA'))
+                            && ['Combinado Familiar', 'Integral de Consorcio', 'Integral de Comercio'].includes(riskType);
                         results.push({
                             name: file.name,
                             type: result.type,
                             cuit: result.data?.cuit || 'N/A',
                             client: result.data?.clientName || 'N/A',
                             company: result.data?.company || 'N/A',
-                            policyNumber: result.data?.policyNumber || result.data?.number || 'N/A'
+                            policyNumber: result.data?.policyNumber || result.data?.number || 'N/A',
+                            riskType,
+                            policySubtype: result.data?.policySubtype || 'Nuevo Negocio',
+                            prima: result.data?.prima || '',
+                            premio: result.data?.premio || '',
+                            coveragesExtracted: result.coveragesExtracted || false,
+                            showCoverageStatus: isMercantilIntegralResult,
                         });
+                    } else if (result.error && (result.error.includes('429') || result.error.includes('503') || result.error.includes('enfriamiento'))) {
+                        triggerQuotaLock();
+                        failedFiles.push({ name: file.name, error: 'Bloqueo por Cuota IA (429/503). Proceso detenido.' });
+                        break;
                     } else {
                         console.error(`Error en archivo ${file.name}:`, result.error);
                         failedFiles.push({ name: file.name, error: result.error || 'Error desconocido' });
                     }
                 } catch (err) {
+                    if (err.status === 429 || err.status === 503 || err.message?.includes('429') || err.message?.includes('503')) {
+                        triggerQuotaLock();
+                        failedFiles.push({ name: file.name, error: 'Bloqueo IA 429/503. Deteniendo lote.' });
+                        break;
+                    }
                     console.error(`Fallo crítico en archivo ${file.name}:`, err);
                     failedFiles.push({ name: file.name, error: err.message || 'Error crítico' });
                 }
             }
 
             if (successCount > 0) {
-                let msg = `✅ RESULTADO DE CARGA IA\n`;
-                msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-                msg += `Guardado Automático Completado.\n`;
-                msg += `✅ ÉXITOS: ${successCount} de ${files.length} archivos procesados\n\n`;
-
-                if (results.length > 0) {
-                    msg += `📋 DETALLE DE ARCHIVOS GUARDADOS:\n`;
-                    results.forEach(d => {
-                        msg += `  ✓ ${d.name}\n`;
-                        msg += `    └─ Tipo: ${d.type || 'N/A'} | Cliente: ${d.client} | Cía: ${d.company} | Nro: ${d.policyNumber}\n`;
-                    });
-                }
-
+                const detailLines = [];
+                results.forEach(d => {
+                    const fmt = (n) => n ? Number(n).toLocaleString('es-AR', { minimumFractionDigits: 2 }) : null;
+                    detailLines.push(`✅ ${d.client} — ${d.company}`);
+                    if (d.policyNumber && d.policyNumber !== 'N/A') detailLines.push(`   Póliza: ${d.policyNumber}`);
+                    if (d.riskType) detailLines.push(`   Ramo: ${d.riskType}`);
+                    if (d.policySubtype) detailLines.push(`   Movimiento: ${d.policySubtype}`);
+                    if (d.prima) detailLines.push(`   Prima: $ ${fmt(d.prima)}`);
+                    if (d.premio) detailLines.push(`   Premio: $ ${fmt(d.premio)}`);
+                    if (d.showCoverageStatus) {
+                        if (d.coveragesExtracted) {
+                            detailLines.push(`   ✅ Coberturas extraídas correctamente`);
+                        } else {
+                            detailLines.push(`   ⚠️ No se extrajo el detalle de cobertura, Ingresar Manualmente`);
+                        }
+                    }
+                });
                 if (failedFiles.length > 0) {
-                    msg += `\n❌ FALLARON (${failedFiles.length}):\n`;
-                    failedFiles.forEach(f => { msg += `  ✗ ${f.name}\n    → ${f.error}\n`; });
-                    msg += `\nPodés volver a subirlos individualmente.`;
+                    detailLines.push('');
+                    failedFiles.forEach(f => detailLines.push(`❌ ${f.name} — ${f.error}`));
                 }
-
-                alert(msg);
+                setUploadResult({
+                    isOpen: true,
+                    status: failedFiles.length > 0 ? 'partial' : 'success',
+                    message: `${successCount} de ${files.length} póliza${successCount !== 1 ? 's' : ''} guardada${successCount !== 1 ? 's' : ''}`,
+                    details: detailLines
+                });
             } else if (failedFiles.length > 0) {
-                let msg = `❌ No se pudo procesar ningún archivo\n\n`;
-                msg += `ARCHIVOS FALLIDOS:\n`;
-                failedFiles.forEach(f => { msg += `  ✗ ${f.name}\n    → ${f.error}\n`; });
-                msg += `\nRevisá los archivos e intentá subirlos de nuevo.`;
-                alert(msg);
+                setUploadResult({
+                    isOpen: true,
+                    status: 'error',
+                    message: 'No se pudo procesar ningún archivo',
+                    details: failedFiles.map(f => `❌ ${f.name} — ${f.error}`)
+                });
             }
 
         } catch (err) {
@@ -776,15 +900,33 @@ const PolicyManager = () => {
         setIsSaving(true);
         try {
             if (editingPolicy.id) {
+                // Guardamos la póliza actual
                 await updatePolicy(editingPolicy.id, editingPolicy);
+
+                // Si cambiaron dni o clientName, propagar a todas las pólizas del mismo cliente
+                const originalPolicy = modalClientPolicies.find(p => p.id === editingPolicy.id);
+                const dniChanged = originalPolicy && originalPolicy.dni !== editingPolicy.dni;
+                const nameChanged = originalPolicy && originalPolicy.clientName !== editingPolicy.clientName;
+
+                if ((dniChanged || nameChanged) && modalClientPolicies.length > 1) {
+                    const otherPolicies = modalClientPolicies.filter(p => p.id !== editingPolicy.id);
+                    for (const pol of otherPolicies) {
+                        const patch = {};
+                        if (dniChanged) patch.dni = editingPolicy.dni;
+                        if (nameChanged) patch.clientName = editingPolicy.clientName;
+                        await updatePolicy(pol.id, { ...pol, ...patch });
+                    }
+                }
             } else {
                 await addPolicy(editingPolicy);
             }
             setIsModalOpen(false);
             setEditingPolicy(null);
+            setModalClientPolicies([]);
+            setModalPolicyIndex(0);
         } catch (error) {
             console.error("Error al guardar póliza:", error);
-            alert("Error al guardar póliza");
+            alert(`Error al guardar póliza: ${error?.message || error?.code || 'Error desconocido'}`);
         } finally {
             setIsSaving(false);
         }
@@ -792,14 +934,35 @@ const PolicyManager = () => {
 
     const handleDelete = async (id) => {
         if (window.confirm("¿Estás seguro de eliminar esta póliza?")) {
-            await deletePolicy(id);
+            try {
+                await deletePolicy(id);
+            } catch (error) {
+                console.error('Error deleting policy:', error);
+                alert(`Error al eliminar: ${error?.message || 'Permiso denegado o sin conexión'}`);
+            }
         }
     };
 
     const handleEdit = (pol) => {
-        console.log("Opening modal for edit:", pol);
+        // Cargar todas las pólizas del mismo cliente para el carrusel
+        const clientGroup = groupedPolicies.find(g =>
+            (pol.clientId && g.clientId === pol.clientId) ||
+            g.id === (pol.clientId || pol.dni || pol.clientName)
+        );
+        const clientPolicies = clientGroup ? [...clientGroup.policies] : [pol];
+        const idx = clientPolicies.findIndex(p => p.id === pol.id);
+        setModalClientPolicies(clientPolicies);
+        setModalPolicyIndex(idx >= 0 ? idx : 0);
         setEditingPolicy({ ...pol });
         setIsModalOpen(true);
+    };
+
+    const navigateModalPolicy = (direction) => {
+        const newIndex = modalPolicyIndex + direction;
+        if (newIndex >= 0 && newIndex < modalClientPolicies.length) {
+            setModalPolicyIndex(newIndex);
+            setEditingPolicy({ ...modalClientPolicies[newIndex] });
+        }
     };
 
     const handleManualAdd = () => {
@@ -808,11 +971,14 @@ const PolicyManager = () => {
         const nextYear = new Date();
         nextYear.setFullYear(today.getFullYear() + 1);
 
+        setModalClientPolicies([]);
+        setModalPolicyIndex(0);
         setEditingPolicy({
             clientName: '',
             dni: '',
             riskType: 'Autos', // Default más común
             isRenewal: false,
+            policySubtype: 'Nuevo Negocio',
             company: '',
             policyNumber: '',
             prima: '',
@@ -827,6 +993,86 @@ const PolicyManager = () => {
             fileName: null
         });
         setIsModalOpen(true);
+    };
+
+    // Handler: procesar archivo del cambio de compañía con IA
+    const handleCambioCompaniaFile = async (file) => {
+        if (!file) return;
+        setCambioCompaniaFile(file);
+        setCambioCompaniaResult(null);
+        setIsCambioCompaniaProcessing(true);
+        setCambioCompaniaProgress({ message: 'Leyendo archivo...', percent: 10 });
+        try {
+            const result = await processFileWithAI(file, 'policy', (msg, pct) => {
+                setCambioCompaniaProgress({ message: msg, percent: pct });
+            });
+            if (result.status === 'success' && result.data) {
+                setCambioCompaniaResult(result.data);
+                setCambioCompaniaProgress({ message: 'Análisis completado', percent: 100 });
+            } else {
+                setCambioCompaniaProgress({ message: result.error || 'Error en el análisis', percent: 0 });
+                setCambioCompaniaResult(null);
+            }
+        } catch (e) {
+            setCambioCompaniaProgress({ message: e.message || 'Error inesperado', percent: 0 });
+        } finally {
+            setIsCambioCompaniaProcessing(false);
+        }
+    };
+
+    // Handler: confirmar cambio de compañía → anula póliza vieja y crea la nueva
+    const handleConfirmCambioCompania = async () => {
+        if (!cambioCompaniaResult || !editingPolicy) return;
+        setIsCambioCompaniaConfirming(true);
+        try {
+            // 1. Anular la póliza existente
+            const cancelledPolicy = {
+                ...editingPolicy,
+                isCancelled: true,
+                cancellationReason: 'Cambio de Compañía',
+                cancellationDate: editingPolicy.cancellationDate || new Date().toISOString().split('T')[0],
+            };
+            await updatePolicy(editingPolicy.id, cancelledPolicy);
+
+            // 2. Crear la nueva póliza con los datos de la IA
+            const newPolicy = {
+                clientName: cambioCompaniaResult.clientName || editingPolicy.clientName || '',
+                dni: cambioCompaniaResult.dni || editingPolicy.dni || '',
+                riskType: cambioCompaniaResult.riskType || editingPolicy.riskType || 'Autos',
+                policySubtype: 'Nuevo Negocio',
+                isRenewal: false,
+                company: cambioCompaniaResult.company || '',
+                policyNumber: cambioCompaniaResult.policyNumber || '',
+                prima: cambioCompaniaResult.prima || '',
+                premio: cambioCompaniaResult.premio || '',
+                insuredSum: cambioCompaniaResult.insuredSum || '',
+                startDate: cambioCompaniaResult.startDate || '',
+                endDate: cambioCompaniaResult.endDate || '',
+                address: cambioCompaniaResult.address || editingPolicy.address || '',
+                currency: cambioCompaniaResult.currency || 'ARS',
+                observations: `Cambio de compañía desde: ${editingPolicy.company || '—'}`,
+                riskDetails: cambioCompaniaResult.riskDetails || null,
+                fileUrl: null,
+                fileName: null,
+            };
+            await addPolicy(newPolicy);
+
+            // 3. Cerrar modales y limpiar estado
+            setIsCambioCompaniaModalOpen(false);
+            setIsCancellationModalOpen(false);
+            setIsModalOpen(false);
+            setEditingPolicy(null);
+            setModalClientPolicies([]);
+            setModalPolicyIndex(0);
+            setCambioCompaniaFile(null);
+            setCambioCompaniaResult(null);
+            setCambioCompaniaProgress({ message: '', percent: 0 });
+        } catch (e) {
+            console.error('Error en cambio de compañía:', e);
+            alert(`Error al procesar el cambio: ${e.message || 'Error desconocido'}`);
+        } finally {
+            setIsCambioCompaniaConfirming(false);
+        }
     };
 
     const handleExportPDF = () => {
@@ -1200,6 +1446,96 @@ const PolicyManager = () => {
         }
     };
 
+    // ── Re-análisis forzado con IA desde el adjunto existente ──────────────────
+    const handleForceReanalizeAI = async () => {
+        if (!editingPolicy?.id) return;
+        const fileData = getFileData(editingPolicy);
+        if (!fileData) {
+            alert("Esta póliza no tiene archivo adjunto para releer.");
+            return;
+        }
+
+        setIsReanalizingAI(true);
+        try {
+            let rawBase64 = null;
+
+            if (fileData.chunked) {
+                rawBase64 = await loadFileChunks(editingPolicy.id);
+            } else if (fileData.base64) {
+                rawBase64 = fileData.base64.includes(',') ? fileData.base64.split(',')[1] : fileData.base64;
+            } else if (fileData.url) {
+                // Legacy URL — intentar cargar desde storage
+                rawBase64 = await loadFileChunks(editingPolicy.id);
+            }
+
+            if (!rawBase64) {
+                alert("No se pudo obtener el archivo adjunto para el análisis.");
+                return;
+            }
+
+            const aiData = await analyzePolicyWithAI(rawBase64);
+
+            if (!aiData || Object.keys(aiData).length === 0) {
+                alert("La IA no pudo extraer datos del archivo.");
+                return;
+            }
+
+            // Merge FORZADO: sobreescribe todos los campos que la IA devuelva
+            const updatedPolicy = { ...editingPolicy };
+            Object.keys(aiData).forEach(k => {
+                const newVal = aiData[k];
+                if (newVal === undefined || newVal === null || newVal === '') return;
+
+                if (k === 'riskDetails' && aiData.riskDetails) {
+                    if (!updatedPolicy.riskDetails) updatedPolicy.riskDetails = {};
+                    if (aiData.riskDetails.vehicle && Object.values(aiData.riskDetails.vehicle).some(v => v)) {
+                        updatedPolicy.riskDetails.vehicle = { ...updatedPolicy.riskDetails.vehicle, ...aiData.riskDetails.vehicle };
+                    }
+                    if ((aiData.riskDetails.coverages?.length || 0) > 0) {
+                        updatedPolicy.riskDetails.coverages = aiData.riskDetails.coverages;
+                    }
+                    if (aiData.riskDetails.alicuota) updatedPolicy.riskDetails.alicuota = aiData.riskDetails.alicuota;
+                } else if (k !== 'id') {
+                    // Sobreescribe siempre (forzado), excepto campos clave si el usuario ya los tiene bien
+                    const keepExisting = ['clientName', 'policyNumber', 'company'].includes(k)
+                        && editingPolicy[k] && editingPolicy[k].length > 2;
+                    if (!keepExisting) updatedPolicy[k] = newVal;
+                    // Para insuredSum, riskType, startDate, endDate, prima, premio → siempre sobreescribir
+                    if (['insuredSum', 'riskType', 'startDate', 'endDate', 'prima', 'premio', 'currency'].includes(k)) {
+                        updatedPolicy[k] = newVal;
+                    }
+                }
+            });
+
+            setEditingPolicy(updatedPolicy);
+            await updatePolicy(editingPolicy.id, updatedPolicy);
+
+            setUploadResult({
+                isOpen: true,
+                status: 'success',
+                message: '¡Re-análisis completado!',
+                details: [
+                    `✅ Datos actualizados desde el PDF adjunto.`,
+                    aiData.clientName ? `👤 Asegurado: ${aiData.clientName}` : '',
+                    aiData.riskType  ? `📋 Ramo: ${aiData.riskType}` : '',
+                    aiData.insuredSum ? `💰 Suma Asegurada: $${Number(aiData.insuredSum).toLocaleString('es-AR')}` : '',
+                    aiData.startDate  ? `📅 Vigencia desde: ${aiData.startDate}` : '',
+                    (aiData.riskDetails?.coverages?.length > 0) ? `🛡️ ${aiData.riskDetails.coverages.length} coberturas extraídas` : '',
+                ].filter(Boolean)
+            });
+        } catch (err) {
+            console.error('[REANALISIS IA] Error:', err);
+            setUploadResult({
+                isOpen: true,
+                status: 'error',
+                message: 'Error en el re-análisis',
+                details: [`❌ ${err.message}`]
+            });
+        } finally {
+            setIsReanalizingAI(false);
+        }
+    };
+
     const handleQuickUpload = async (pol, file) => {
         if (!file || !pol?.id) return;
 
@@ -1477,6 +1813,33 @@ const PolicyManager = () => {
     return (
         <div className="w-full relative">
             <div className="w-full space-y-8 animate-in fade-in duration-500 mb-20">
+                {/* 0. Alerta de Cuota Gemini (Injection Prompt) */}
+                <AnimatePresence>
+                    {quotaLock.isLocked && (
+                        <motion.div
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: 'auto' }}
+                            exit={{ opacity: 0, height: 0 }}
+                            className="w-full bg-red-500/10 border border-red-500/20 rounded-2xl p-4 flex items-center justify-between gap-4 mb-4"
+                        >
+                            <div className="flex items-center gap-3">
+                                <AlertTriangle className="text-red-500 animate-pulse" size={20} />
+                                <p className="text-red-500 font-black uppercase text-[10px] tracking-wider">
+                                    Límite de Google alcanzado. Reintentando en: {quotaLock.remainingSeconds} segundos...
+                                </p>
+                            </div>
+                            <div className="h-1 flex-1 bg-red-500/10 rounded-full overflow-hidden">
+                                <motion.div
+                                    className="h-full bg-red-500"
+                                    initial={{ width: '100%' }}
+                                    animate={{ width: '0%' }}
+                                    transition={{ duration: 60, ease: 'linear' }}
+                                />
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
                 {/* 1. Fila de Encabezado (Título y Acciones Globales) */}
                 <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3 md:gap-4 bg-[var(--card-bg)] p-3 md:p-5 rounded-2xl md:rounded-[24px] border border-[var(--border-color)] backdrop-blur-xl transition-all shadow-[var(--card-shadow)]">
                     <div className="flex flex-col gap-5">
@@ -1494,6 +1857,33 @@ const PolicyManager = () => {
                             </div>
                         </div>
 
+                        {/* Banner de Enfriamiento IA J&L */}
+                        <AnimatePresence>
+                            {quotaLock.isLocked && (
+                                <motion.div
+                                    initial={{ height: 0, opacity: 0 }}
+                                    animate={{ height: 'auto', opacity: 1 }}
+                                    exit={{ height: 0, opacity: 0 }}
+                                    className="overflow-hidden mb-2"
+                                >
+                                    <div className="flex items-center gap-3 px-4 py-3 bg-red-500/20 border border-red-500/40 rounded-xl">
+                                        <div className="relative w-8 h-8 flex items-center justify-center">
+                                            <div className="absolute inset-0 border-2 border-red-500/20 rounded-full" />
+                                            <div
+                                                className="absolute inset-0 border-2 border-red-500 border-t-transparent rounded-full animate-spin"
+                                                style={{ animationDuration: '2s' }}
+                                            />
+                                            <ShieldAlert size={14} className="text-red-500" />
+                                        </div>
+                                        <div className="flex flex-col">
+                                            <span className="text-xs font-black text-red-400 uppercase tracking-tighter">Sistema en enfriamiento</span>
+                                            <span className="text-[10px] font-bold text-red-400/70 uppercase">Espera {quotaLock.remainingSeconds} segundos para evitar bloqueos IA</span>
+                                        </div>
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+
                         {/* Botones de Acciones - ABAJO DEL TÍTULO (Feedback v17) */}
                         <div className="flex flex-wrap items-center gap-1.5 p-1 bg-[var(--bg-color)] rounded-xl border border-[var(--border-color)] w-fit shadow-inner">
                             <button
@@ -1503,15 +1893,15 @@ const PolicyManager = () => {
                                 <Save size={14} />
                                 Nueva
                             </button>
-                            <label className="flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer hover:bg-[var(--text-color)]/5 text-[var(--text-secondary)] hover:text-[var(--text-color)] transition-all">
+                            <label className={`flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer hover:bg-[var(--text-color)]/5 text-[var(--text-secondary)] hover:text-[var(--text-color)] transition-all ${quotaLock.isLocked ? 'opacity-30 cursor-not-allowed' : ''}`}>
                                 <Zap size={14} className="text-emerald-500" />
                                 <span className="text-[10px] font-black uppercase tracking-widest">Planilla</span>
-                                <input type="file" className="hidden" accept=".csv,.xlsx,.xls" onChange={handleCsvUploadWithAI} disabled={isProcessing} />
+                                <input type="file" className="hidden" accept=".csv,.xlsx,.xls" onChange={handleCsvUploadWithAI} disabled={isProcessing || quotaLock.isLocked} />
                             </label>
-                            <label className="flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer hover:bg-[var(--text-color)]/5 text-[var(--text-secondary)] hover:text-[var(--text-color)] transition-all">
+                            <label className={`flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer hover:bg-[var(--text-color)]/5 text-[var(--text-secondary)] hover:text-[var(--text-color)] transition-all ${quotaLock.isLocked ? 'opacity-30 cursor-not-allowed' : ''}`}>
                                 <Upload size={14} className="text-indigo-500" />
                                 <span className="text-[10px] font-black uppercase tracking-widest">PDF IA</span>
-                                <input type="file" className="hidden" accept=".pdf" onChange={handleFileUpload} disabled={isProcessing} multiple />
+                                <input type="file" className="hidden" accept=".pdf" onChange={handleFileUpload} disabled={isProcessing || quotaLock.isLocked} multiple />
                             </label>
                             <label className="flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer hover:bg-[var(--text-color)]/5 text-[var(--text-secondary)] hover:text-[var(--text-color)] transition-all border-l border-[var(--border-color)] ml-1">
                                 <ShieldCheck size={14} className="text-orange-500" />
@@ -1537,13 +1927,22 @@ const PolicyManager = () => {
                             {policies.length > 0 && (
                                 <div className="flex items-center gap-1 border-l border-white/5 pl-1 ml-1">
                                     <button
+                                        onClick={handleAssignClientIds}
+                                        disabled={isProcessing}
+                                        className="flex items-center gap-2 px-3 py-2.5 rounded-lg hover:bg-violet-500/10 text-violet-400 transition-all group"
+                                        title="Asignar ID único por cliente (migración de base de datos)"
+                                    >
+                                        <Users size={14} className="group-hover:scale-110 transition-transform duration-500" />
+                                        <span className="text-[10px] font-black uppercase tracking-widest hidden sm:inline">Asignar IDs</span>
+                                    </button>
+                                    <button
                                         onClick={handleMergeClients}
                                         disabled={isProcessing}
                                         className="flex items-center gap-2 px-3 py-2.5 rounded-lg hover:bg-emerald-500/10 text-emerald-400 transition-all group"
-                                        title="Unificar pólizas de un mismo cliente bajo un único DNI/CUIT"
+                                        title="Unificar clientes por nombre normalizado (JUAN PEREZ = PEREZ JUAN)"
                                     >
                                         <Users size={14} className="group-hover:scale-110 transition-transform duration-500" />
-                                        <span className="text-[10px] font-black uppercase tracking-widest hidden sm:inline">Fusionar Clientes</span>
+                                        <span className="text-[10px] font-black uppercase tracking-widest hidden sm:inline">Unificar Nombres</span>
                                     </button>
                                     <button
                                         onClick={handleUnify}
@@ -1607,7 +2006,7 @@ const PolicyManager = () => {
                                     type="text"
                                     placeholder="Buscar por nombre, DNI o póliza..."
                                     value={searchTerm}
-                                    onChange={(e) => setSearchTerm(e.target.value)}
+                                    onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
                                     className="w-full bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl py-2.5 pl-10 pr-4 text-[13px] text-[var(--text-color)] focus:outline-none focus:border-indigo-500/50 transition-all font-bold tracking-wide placeholder:text-[var(--text-secondary)]/50 shadow-sm"
                                 />
                             </div>
@@ -1616,7 +2015,7 @@ const PolicyManager = () => {
                             <div className="relative">
                                 <select
                                     value={filterAttachment}
-                                    onChange={(e) => setFilterAttachment(e.target.value)}
+                                    onChange={(e) => { setFilterAttachment(e.target.value); setCurrentPage(1); }}
                                     className="bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all appearance-none cursor-pointer pr-10 shadow-sm min-w-[140px]"
                                 >
                                     <option value="All">Todos los Archivos</option>
@@ -1632,10 +2031,11 @@ const PolicyManager = () => {
                             <div className="relative">
                                 <select
                                     value={filterStatus}
-                                    onChange={(e) => setFilterStatus(e.target.value)}
+                                    onChange={(e) => { setFilterStatus(e.target.value); setCurrentPage(1); }}
                                     className="bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-orange-400 focus:outline-none focus:ring-2 focus:ring-orange-500/30 transition-all appearance-none cursor-pointer pr-10 shadow-sm min-w-[140px]"
                                 >
                                     <option value="All">Todos los Estados</option>
+                                    <option value="Latest">Últimas Subidas 🆕</option>
                                     <option value="Active">Solo Vigentes</option>
                                     <option value="Expired">Solo Vencidas ⌛</option>
                                     <option value="Cancelled">Solo Anuladas 🚫</option>
@@ -1644,6 +2044,32 @@ const PolicyManager = () => {
                                     <AlertTriangle size={14} />
                                 </div>
                             </div>
+
+                            {/* Botón Más Reciente */}
+                            <button
+                                onClick={() => { setFilterStatus(filterStatus === 'Latest' ? 'Active' : 'Latest'); setCurrentPage(1); }}
+                                className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all shadow-sm whitespace-nowrap ${
+                                    filterStatus === 'Latest'
+                                        ? 'bg-indigo-500 border-indigo-500 text-white shadow-indigo-500/30'
+                                        : 'bg-[var(--bg-color)] border-[var(--border-color)] text-indigo-400 hover:border-indigo-500/50 hover:text-indigo-300'
+                                }`}
+                            >
+                                <Clock size={13} />
+                                Más Reciente
+                            </button>
+
+                            {/* Filtro Moneda USD */}
+                            <button
+                                onClick={() => { setFilterCurrency(filterCurrency === 'USD' ? 'All' : 'USD'); setCurrentPage(1); }}
+                                className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all shadow-sm whitespace-nowrap ${
+                                    filterCurrency === 'USD'
+                                        ? 'bg-emerald-500 border-emerald-500 text-white shadow-emerald-500/30'
+                                        : 'bg-[var(--bg-color)] border-[var(--border-color)] text-emerald-400 hover:border-emerald-500/50 hover:text-emerald-300'
+                                }`}
+                            >
+                                <DollarSign size={13} />
+                                Solo USD
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -1663,7 +2089,7 @@ const PolicyManager = () => {
                                 return (
                                     <button
                                         key={ramo}
-                                        onClick={() => setFilterRisk(isActive ? 'All' : ramo)}
+                                        onClick={() => { setFilterRisk(isActive ? 'All' : ramo); setCurrentPage(1); }}
                                         className={`flex flex-col items-center group/item cursor-pointer px-1 relative transition-all ${isActive ? 'scale-105' : 'opacity-70 hover:opacity-100'}`}
                                     >
                                         <span className={`text-[7px] font-black uppercase tracking-tight transition-colors ${isActive ? 'text-indigo-500' : 'text-[var(--text-secondary)] group-hover/item:text-indigo-500'}`}>
@@ -1762,7 +2188,7 @@ const PolicyManager = () => {
                             <div className="relative">
                                 <select
                                     value={filterCompany}
-                                    onChange={(e) => setFilterCompany(e.target.value)}
+                                    onChange={(e) => { setFilterCompany(e.target.value); setCurrentPage(1); }}
                                     className="bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl px-4 py-2 text-[11px] font-black uppercase tracking-widest text-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all appearance-none cursor-pointer pr-10 shadow-sm"
                                 >
                                     <option value="All" className="bg-[var(--card-bg)]">Todas las Compañías</option>
@@ -1784,6 +2210,7 @@ const PolicyManager = () => {
                                         setFilterStatus('Active');
                                         setSearchTerm('');
                                         setShowOnlyMissingFiles(false);
+                                        setCurrentPage(1);
                                     }}
                                     className="flex items-center gap-2 px-4 py-2.5 bg-rose-500/10 rounded-xl border border-rose-500/20 hover:bg-rose-500/20 text-rose-400 transition-all group"
                                     title="Quitar todos los filtros"
@@ -1813,7 +2240,7 @@ const PolicyManager = () => {
                                 {['Todos', ...RAMOS].map(risk => (
                                     <button
                                         key={risk}
-                                        onClick={() => setFilterRisk(risk === 'Todos' ? 'All' : risk)}
+                                        onClick={() => { setFilterRisk(risk === 'Todos' ? 'All' : risk); setCurrentPage(1); }}
                                         className={`
                                         px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-[0.05em] transition-all whitespace-nowrap
                                         ${(filterRisk === 'All' && risk === 'Todos') || filterRisk === risk ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'text-[var(--text-secondary)] hover:text-indigo-500 hover:bg-indigo-500/5'}
@@ -1890,7 +2317,13 @@ const PolicyManager = () => {
                                                 <div key={p.id} className={`mt-1.5 p-2 rounded-lg border ${p.isCancelled ? 'bg-red-500/5 border-red-500/20' : getExpirationRowBg(p.endDate) || 'bg-black/20 border-white/5'}`}>
                                                     <div className="flex items-center justify-between gap-2 mb-1">
                                                         <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                                                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase ${p.isCancelled ? 'bg-red-500/20 text-red-400' : 'bg-indigo-500/10 text-indigo-400'}`}>{p.riskType}</span>
+                                                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase shrink-0 ${p.isCancelled ? 'bg-red-500/20 text-red-400' : 'bg-indigo-500/10 text-indigo-400'}`}>{p.riskType}</span>
+                                                            {(() => {
+                                                                const sub = getPolicySubtype(p);
+                                                                if (sub === 'Nuevo Negocio') return null;
+                                                                const isEndoso = sub.startsWith('Endoso');
+                                                                return <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase shrink-0 ${isEndoso ? 'bg-amber-500/15 text-amber-400' : 'bg-blue-500/15 text-blue-400'}`}>{sub}</span>;
+                                                            })()}
                                                             <span className="text-[10px] font-bold text-[var(--text-secondary)] truncate italic">{abbreviateCompany(p.company)}</span>
                                                         </div>
                                                         <span className="text-[12px] font-black text-emerald-400 italic shrink-0">${(Number(p.prima) || 0).toLocaleString('es-AR')}</span>
@@ -2132,7 +2565,7 @@ const PolicyManager = () => {
                                                                             <div className="flex items-center gap-1">
                                                                                 <div className={`w-1.5 h-1.5 rounded-full ${p.isCancelled ? 'bg-red-500' : 'bg-emerald-500'}`} />
                                                                                 <span className="text-[9.5px] font-bold text-[var(--text-secondary)] uppercase tracking-tight">
-                                                                                    {p.isCancelled ? 'Anulada' : p.isRenewal ? 'Ren.' : 'Vig.'}
+                                                                                    {p.isCancelled ? 'Anulada' : (() => { const sub = getPolicySubtype(p); if (sub === 'Nuevo Negocio') return 'Vig.'; if (sub === 'Renovación') return 'Ren.'; return sub; })()}
                                                                                 </span>
                                                                             </div>
                                                                         </div>
@@ -2299,7 +2732,7 @@ const PolicyManager = () => {
                                 animate={{ opacity: 1 }}
                                 exit={{ opacity: 0 }}
                                 className="absolute inset-0 bg-black/80 backdrop-blur-md"
-                                onClick={() => !isSaving && setIsModalOpen(false)}
+                                onClick={() => { if (!isSaving) { setIsModalOpen(false); setModalClientPolicies([]); setModalPolicyIndex(0); } }}
                             />
                             <motion.div
                                 initial={{ scale: 0.9, opacity: 0, y: 20 }}
@@ -2307,13 +2740,52 @@ const PolicyManager = () => {
                                 exit={{ scale: 0.9, opacity: 0, y: 20 }}
                                 className="bg-[var(--card-bg)] border border-[var(--border-color)] w-full max-w-3xl rounded-[32px] shadow-[var(--card-shadow)] overflow-hidden relative"
                             >
-                                <div className="p-4 border-b border-[var(--border-color)] flex justify-between items-center bg-[var(--bg-color)]/50">
-                                    <h3 className="text-lg font-black text-[var(--text-color)] italic uppercase tracking-tighter">
-                                        {editingPolicy?.id ? 'Editar Póliza' : 'Revisar Extracción IA'}
-                                    </h3>
-                                    <button onClick={() => setIsModalOpen(false)} className="p-1.5 hover:bg-[var(--text-color)]/5 rounded-full transition-colors">
-                                        <X size={18} className="text-[var(--text-secondary)]" />
-                                    </button>
+                                <div className="p-4 border-b border-[var(--border-color)] flex justify-between items-center gap-3 bg-[var(--bg-color)]/50">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <h3 className="text-lg font-black text-[var(--text-color)] italic uppercase tracking-tighter shrink-0">
+                                            {editingPolicy?.id ? 'Editar Póliza' : 'Revisar Extracción IA'}
+                                        </h3>
+                                        {/* Badge de subtipo */}
+                                        {editingPolicy?.id && (() => {
+                                            const sub = getPolicySubtype(editingPolicy);
+                                            if (sub === 'Nuevo Negocio') return null;
+                                            const isEndoso = sub.startsWith('Endoso');
+                                            return (
+                                                <span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest shrink-0 ${isEndoso ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' : 'bg-blue-500/15 text-blue-400 border border-blue-500/30'}`}>
+                                                    {sub}
+                                                </span>
+                                            );
+                                        })()}
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        {/* Navegación carrusel multi-póliza */}
+                                        {modalClientPolicies.length > 1 && (
+                                            <div className="flex items-center gap-1 bg-[var(--text-color)]/5 border border-[var(--border-color)] rounded-xl px-1.5 py-1">
+                                                <button
+                                                    onClick={() => navigateModalPolicy(-1)}
+                                                    disabled={modalPolicyIndex === 0}
+                                                    className="p-1 rounded-lg disabled:opacity-25 hover:bg-[var(--text-color)]/10 transition-colors"
+                                                    title="Póliza anterior"
+                                                >
+                                                    <ChevronLeft size={14} className="text-[var(--text-secondary)]" />
+                                                </button>
+                                                <span className="text-[10px] font-black text-[var(--text-secondary)] min-w-[32px] text-center">
+                                                    {modalPolicyIndex + 1} / {modalClientPolicies.length}
+                                                </span>
+                                                <button
+                                                    onClick={() => navigateModalPolicy(1)}
+                                                    disabled={modalPolicyIndex === modalClientPolicies.length - 1}
+                                                    className="p-1 rounded-lg disabled:opacity-25 hover:bg-[var(--text-color)]/10 transition-colors"
+                                                    title="Póliza siguiente"
+                                                >
+                                                    <ChevronRight size={14} className="text-[var(--text-secondary)]" />
+                                                </button>
+                                            </div>
+                                        )}
+                                        <button onClick={() => setIsModalOpen(false)} className="p-1.5 hover:bg-[var(--text-color)]/5 rounded-full transition-colors">
+                                            <X size={18} className="text-[var(--text-secondary)]" />
+                                        </button>
+                                    </div>
                                 </div>
 
                                 <div className="p-6 overflow-y-auto custom-scrollbar bg-[var(--bg-color)]/30 max-h-[82vh]">
@@ -2436,12 +2908,18 @@ const PolicyManager = () => {
                                                     <label className="block">
                                                         <span className="text-[10px] font-black text-[var(--text-secondary)] uppercase ml-2">Movimiento</span>
                                                         <select
-                                                            value={editingPolicy?.isRenewal ? 'true' : 'false'}
-                                                            onChange={(e) => setEditingPolicy({ ...editingPolicy, isRenewal: e.target.value === 'true' })}
+                                                            value={getPolicySubtype(editingPolicy)}
+                                                            onChange={(e) => {
+                                                                const val = e.target.value;
+                                                                setEditingPolicy({ ...editingPolicy, policySubtype: val, isRenewal: val === 'Renovación' });
+                                                            }}
                                                             className="w-full bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl py-2 px-3 text-[var(--text-color)] text-[11px] focus:border-indigo-500 outline-none mt-1.5 transition-all uppercase font-black"
                                                         >
-                                                            <option value="false">Nuevo Negocio</option>
-                                                            <option value="true">Renovación</option>
+                                                            <option value="Nuevo Negocio">Nuevo Negocio</option>
+                                                            <option value="Renovación">Renovación</option>
+                                                            {['01','02','03','04','05'].map(n => (
+                                                                <option key={n} value={`Endoso ${n}`}>Endoso {n}</option>
+                                                            ))}
                                                         </select>
                                                     </label>
                                                 </div>
@@ -2601,7 +3079,7 @@ const PolicyManager = () => {
                                                     </button>
                                                 </div>
                                                 <div className="space-y-2">
-                                                    {(editingPolicy?.riskDetails?.coverages || [{ description: 'Incendio Edificio', amount: 0 }, { description: 'Robo Contenido', amount: 0 }]).map((cov, idx) => (
+                                                    {(editingPolicy?.riskDetails?.coverages || []).map((cov, idx) => (
                                                         <div key={idx} className="grid grid-cols-12 gap-2 items-center">
                                                             <input
                                                                 type="text"
@@ -2642,6 +3120,83 @@ const PolicyManager = () => {
                                             </div>
                                         )}
 
+                                        {/* ── BLOQUE: SUMAS SUGERIDAS POR INFLACIÓN IPC ── */}
+                                        {RAMOS_RENOVACION.includes(editingPolicy?.riskType) && (() => {
+                                            const inflacion = calcularInflacionAcumulada(editingPolicy?.startDate);
+                                            if (inflacion === null) return null;
+                                            const coverages = editingPolicy?.riskDetails?.coverages || [];
+                                            const currency = editingPolicy?.currency || 'ARS';
+                                            const sym = currency === 'USD' ? 'u$s ' : '$ ';
+                                            const sumaOrig = parseFloat(String(editingPolicy?.insuredSum || '0').replace(/[^\d.]/g, '')) || 0;
+                                            const sumaNueva = sumaOrig > 0 ? Math.round(sumaOrig * (1 + inflacion / 100)) : null;
+                                            return (
+                                                <div className="bg-teal-500/5 p-5 rounded-[24px] border border-teal-500/20 space-y-3">
+                                                    {/* Header */}
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex items-center gap-2">
+                                                            <RefreshCw size={15} className="text-teal-400" />
+                                                            <span className="text-[11px] font-black text-[var(--text-color)] uppercase tracking-wider">
+                                                                Sumas Sugeridas — Renovación
+                                                            </span>
+                                                        </div>
+                                                        <span className="px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-[10px] font-black uppercase tracking-wider">
+                                                            +{inflacion.toFixed(1)}% IPC acumulado
+                                                        </span>
+                                                    </div>
+
+                                                    {/* Suma principal */}
+                                                    {sumaOrig > 0 && (
+                                                        <div className="flex items-center justify-between px-3 py-2.5 rounded-xl bg-[var(--bg-color)] border border-[var(--border-color)]">
+                                                            <span className="text-[10px] font-black uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>
+                                                                Suma Asegurada Total
+                                                            </span>
+                                                            <div className="flex items-center gap-3">
+                                                                <span className="text-[11px] font-mono line-through" style={{ color: 'var(--text-secondary)' }}>
+                                                                    {sym}{sumaOrig.toLocaleString('es-AR')}
+                                                                </span>
+                                                                <span className="text-[13px] font-black font-mono text-teal-400">
+                                                                    {sym}{sumaNueva?.toLocaleString('es-AR')}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Coberturas individuales */}
+                                                    {coverages.length > 0 && (
+                                                        <div className="space-y-1.5">
+                                                            {/* Encabezados */}
+                                                            <div className="grid grid-cols-12 gap-2 px-1 mb-1">
+                                                                <span className="col-span-5 text-[8px] font-black uppercase tracking-widest" style={{ color: 'var(--text-secondary)' }}>Cobertura</span>
+                                                                <span className="col-span-3 text-[8px] font-black uppercase tracking-widest text-right" style={{ color: 'var(--text-secondary)' }}>Actual</span>
+                                                                <span className="col-span-4 text-[8px] font-black uppercase tracking-widest text-right text-teal-400">Sugerida</span>
+                                                            </div>
+                                                            {coverages.map((cov, idx) => {
+                                                                const orig = parseFloat(String(cov.amount || '0').replace(/[^\d.]/g, '')) || 0;
+                                                                const nueva = orig > 0 ? Math.round(orig * (1 + inflacion / 100)) : null;
+                                                                return (
+                                                                    <div key={idx} className="grid grid-cols-12 gap-2 items-center px-3 py-2 rounded-xl bg-[var(--bg-color)] border border-[var(--border-color)]">
+                                                                        <span className="col-span-5 text-[10px] font-bold uppercase truncate" style={{ color: 'var(--text-color)' }}>
+                                                                            {cov.description || '—'}
+                                                                        </span>
+                                                                        <span className="col-span-3 text-[10px] font-mono text-right line-through" style={{ color: 'var(--text-secondary)' }}>
+                                                                            {orig > 0 ? `${sym}${orig.toLocaleString('es-AR')}` : '—'}
+                                                                        </span>
+                                                                        <span className="col-span-4 text-[11px] font-black font-mono text-right text-teal-400">
+                                                                            {nueva ? `${sym}${nueva.toLocaleString('es-AR')}` : '—'}
+                                                                        </span>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+
+                                                    <p className="text-[8px] font-bold uppercase tracking-wide text-center pt-1" style={{ color: 'var(--text-secondary)' }}>
+                                                        IPC INDEC · Desde fecha de emisión hasta mar 2026 · Valores orientativos
+                                                    </p>
+                                                </div>
+                                            );
+                                        })()}
+
                                         {(editingPolicy?.riskType === 'ART') && (
                                             <div className="bg-sky-500/5 p-5 rounded-[24px] border border-sky-500/10 space-y-4">
                                                 <div className="flex items-center gap-2 mb-2">
@@ -2677,9 +3232,13 @@ const PolicyManager = () => {
                                                     <button
                                                         onClick={() => {
                                                             const current = editingPolicy?.riskDetails?.insuredPersons || [];
+                                                            const isAP = editingPolicy?.riskType === 'Accidentes Personales';
+                                                            const newPerson = isAP
+                                                                ? { name: '', dni: '', nacimiento: '', usaMoto: false, amount: 0 }
+                                                                : { name: '', amount: 0 };
                                                             setEditingPolicy({
                                                                 ...editingPolicy,
-                                                                riskDetails: { ...editingPolicy.riskDetails, insuredPersons: [...current, { name: '', amount: 0 }] }
+                                                                riskDetails: { ...editingPolicy.riskDetails, insuredPersons: [...current, newPerson] }
                                                             });
                                                         }}
                                                         className="p-1 px-2 rounded-lg bg-indigo-500/10 text-indigo-500 text-[9px] font-black uppercase hover:bg-indigo-500 hover:text-[var(--text-color)] transition-all"
@@ -2688,43 +3247,85 @@ const PolicyManager = () => {
                                                     </button>
                                                 </div>
                                                 <div className="space-y-2">
-                                                    {(editingPolicy?.riskDetails?.insuredPersons || [{ name: '', amount: 0 }]).map((person, idx) => (
-                                                        <div key={idx} className="grid grid-cols-12 gap-2 items-center">
-                                                            <input
-                                                                type="text"
-                                                                placeholder="Nombre / DNI (ej: Juan Pérez)"
-                                                                value={person.name}
-                                                                onChange={(e) => {
-                                                                    const newList = [...(editingPolicy?.riskDetails?.insuredPersons || [])];
-                                                                    newList[idx] = { ...newList[idx], name: e.target.value };
-                                                                    setEditingPolicy({ ...editingPolicy, riskDetails: { ...editingPolicy.riskDetails, insuredPersons: newList } });
-                                                                }}
-                                                                className="col-span-7 bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl py-2 px-3 text-[var(--text-color)] text-[11px] outline-none uppercase"
-                                                            />
-                                                            <div className="col-span-4 relative">
+                                                    {(editingPolicy?.riskDetails?.insuredPersons || [{ name: '', amount: 0 }]).map((person, idx) => {
+                                                        const isAP = editingPolicy?.riskType === 'Accidentes Personales';
+                                                        const updatePerson = (field, value) => {
+                                                            const newList = [...(editingPolicy?.riskDetails?.insuredPersons || [])];
+                                                            newList[idx] = { ...newList[idx], [field]: value };
+                                                            setEditingPolicy({ ...editingPolicy, riskDetails: { ...editingPolicy.riskDetails, insuredPersons: newList } });
+                                                        };
+                                                        return isAP ? (
+                                                            <div key={idx} className="flex flex-col gap-1.5 p-3 rounded-2xl border border-indigo-500/10 bg-indigo-500/5">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="text-[9px] font-black text-indigo-400/60 w-4 text-center shrink-0">{idx + 1}</span>
+                                                                    <input
+                                                                        type="text"
+                                                                        placeholder="Nombre completo"
+                                                                        value={person.name || ''}
+                                                                        onChange={(e) => updatePerson('name', e.target.value)}
+                                                                        className="flex-1 bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl py-1.5 px-3 text-[var(--text-color)] text-[11px] outline-none uppercase"
+                                                                    />
+                                                                    <button onClick={() => {
+                                                                        const newList = editingPolicy.riskDetails.insuredPersons.filter((_, i) => i !== idx);
+                                                                        setEditingPolicy({ ...editingPolicy, riskDetails: { ...editingPolicy.riskDetails, insuredPersons: newList } });
+                                                                    }} className="p-1.5 text-rose-500/40 hover:text-rose-500 shrink-0">
+                                                                        <MinusCircle size={13} />
+                                                                    </button>
+                                                                </div>
+                                                                <div className="flex items-center gap-2 pl-6">
+                                                                    <input
+                                                                        type="text"
+                                                                        placeholder="DNI"
+                                                                        value={person.dni || ''}
+                                                                        onChange={(e) => updatePerson('dni', e.target.value)}
+                                                                        className="w-28 bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl py-1.5 px-3 text-indigo-400 font-mono text-[11px] outline-none"
+                                                                    />
+                                                                    <input
+                                                                        type="text"
+                                                                        placeholder="Nacimiento DD/MM/YYYY"
+                                                                        value={person.nacimiento || ''}
+                                                                        onChange={(e) => updatePerson('nacimiento', e.target.value)}
+                                                                        className="w-36 bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl py-1.5 px-3 text-[var(--text-secondary)] text-[11px] outline-none"
+                                                                    />
+                                                                    <input
+                                                                        type="text"
+                                                                        placeholder="$ Suma aseg."
+                                                                        value={formatCurrency(person.amount, editingPolicy?.currency)}
+                                                                        onChange={(e) => updatePerson('amount', parseCurrency(e.target.value))}
+                                                                        className="flex-1 bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl py-1.5 px-3 text-indigo-500 font-bold text-[11px] outline-none"
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                        ) : (
+                                                            <div key={idx} className="grid grid-cols-12 gap-2 items-center">
                                                                 <input
                                                                     type="text"
-                                                                    placeholder="$ Suma"
-                                                                    value={formatCurrency(person.amount, editingPolicy?.currency)}
-                                                                    onChange={(e) => {
-                                                                        const newList = [...(editingPolicy?.riskDetails?.insuredPersons || [])];
-                                                                        newList[idx] = { ...newList[idx], amount: parseCurrency(e.target.value) };
+                                                                    placeholder="Nombre / DNI (ej: Juan Pérez)"
+                                                                    value={person.name || ''}
+                                                                    onChange={(e) => updatePerson('name', e.target.value)}
+                                                                    className="col-span-7 bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl py-2 px-3 text-[var(--text-color)] text-[11px] outline-none uppercase"
+                                                                />
+                                                                <div className="col-span-4 relative">
+                                                                    <input
+                                                                        type="text"
+                                                                        placeholder="$ Suma"
+                                                                        value={formatCurrency(person.amount, editingPolicy?.currency)}
+                                                                        onChange={(e) => updatePerson('amount', parseCurrency(e.target.value))}
+                                                                        className="w-full bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl py-2 px-3 text-indigo-500 font-bold text-[11px] outline-none"
+                                                                    />
+                                                                </div>
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const newList = editingPolicy.riskDetails.insuredPersons.filter((_, i) => i !== idx);
                                                                         setEditingPolicy({ ...editingPolicy, riskDetails: { ...editingPolicy.riskDetails, insuredPersons: newList } });
                                                                     }}
-                                                                    className="w-full bg-[var(--bg-color)] border border-[var(--border-color)] rounded-xl py-2 px-3 text-indigo-500 font-bold text-[11px] outline-none"
-                                                                />
+                                                                    className="col-span-1 p-2 text-rose-500/50 hover:text-rose-500"
+                                                                >
+                                                                    <MinusCircle size={14} />
+                                                                </button>
                                                             </div>
-                                                            <button
-                                                                onClick={() => {
-                                                                    const newList = editingPolicy.riskDetails.insuredPersons.filter((_, i) => i !== idx);
-                                                                    setEditingPolicy({ ...editingPolicy, riskDetails: { ...editingPolicy.riskDetails, insuredPersons: newList } });
-                                                                }}
-                                                                className="col-span-1 p-2 text-rose-500/50 hover:text-rose-500"
-                                                            >
-                                                                <MinusCircle size={14} />
-                                                            </button>
-                                                        </div>
-                                                    ))}
+                                                        );
+                                                    })}
                                                 </div>
                                             </div>
                                         )}
@@ -2820,6 +3421,15 @@ const PolicyManager = () => {
                                                         <div className="flex items-center gap-2">
                                                             <div className="flex items-center gap-1">
                                                                 <button
+                                                                    onClick={handleForceReanalizeAI}
+                                                                    disabled={isReanalizingAI}
+                                                                    className="flex items-center gap-1 px-2 py-1.5 bg-violet-500/10 text-violet-400 hover:bg-violet-500 hover:text-white rounded-lg transition-all text-[8px] font-black uppercase tracking-wider disabled:opacity-50"
+                                                                    title="Re-leer datos con IA"
+                                                                >
+                                                                    {isReanalizingAI ? <div className="w-3 h-3 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" /> : <Sparkles size={11} />}
+                                                                    {isReanalizingAI ? 'Leyendo...' : 'Releer IA'}
+                                                                </button>
+                                                                <button
                                                                     onClick={() => handleOpenFile(editingPolicy)}
                                                                     className="p-2 bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500 hover:text-white rounded-lg transition-all"
                                                                     title="Ver archivo"
@@ -2863,6 +3473,15 @@ const PolicyManager = () => {
                                                         <div className="flex items-center gap-2">
                                                             {(file.chunked || file.url || file.base64) && (
                                                                 <div className="flex items-center gap-1">
+                                                                    <button
+                                                                        onClick={handleForceReanalizeAI}
+                                                                        disabled={isReanalizingAI}
+                                                                        className="flex items-center gap-1 px-2 py-1.5 bg-violet-500/10 text-violet-400 hover:bg-violet-500 hover:text-white rounded-lg transition-all text-[8px] font-black uppercase tracking-wider disabled:opacity-50"
+                                                                        title="Re-leer datos de la póliza con IA"
+                                                                    >
+                                                                        {isReanalizingAI ? <div className="w-3 h-3 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" /> : <Sparkles size={11} />}
+                                                                        {isReanalizingAI ? 'Leyendo...' : 'Releer IA'}
+                                                                    </button>
                                                                     <button
                                                                         onClick={() => handleOpenFile(editingPolicy)}
                                                                         className="p-2 bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500 hover:text-white rounded-lg transition-all"
@@ -3120,18 +3739,201 @@ const PolicyManager = () => {
                                                 alert("Por favor elegí un motivo");
                                                 return;
                                             }
-                                            setEditingPolicy({ ...editingPolicy, isCancelled: true });
-                                            setIsCancellationModalOpen(false);
+                                            if (editingPolicy.cancellationReason === 'Cambio de Compañía') {
+                                                // Guardar fecha de anulación en el estado y abrir modal de cambio
+                                                setIsCancellationModalOpen(false);
+                                                setCambioCompaniaFile(null);
+                                                setCambioCompaniaResult(null);
+                                                setCambioCompaniaProgress({ message: '', percent: 0 });
+                                                setIsCambioCompaniaModalOpen(true);
+                                            } else {
+                                                setEditingPolicy({ ...editingPolicy, isCancelled: true });
+                                                setIsCancellationModalOpen(false);
+                                            }
                                         }}
-                                        className="py-3 px-4 rounded-2xl bg-red-600 text-white text-[11px] font-black uppercase shadow-lg shadow-red-600/20 hover:bg-red-500 transition-all hover:scale-[1.02] active:scale-[0.98]"
+                                        className={`py-3 px-4 rounded-2xl text-white text-[11px] font-black uppercase shadow-lg transition-all hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2 ${editingPolicy?.cancellationReason === 'Cambio de Compañía' ? 'bg-blue-600 shadow-blue-600/20 hover:bg-blue-500' : 'bg-red-600 shadow-red-600/20 hover:bg-red-500'}`}
                                     >
-                                        Confirmar Anulación
+                                        {editingPolicy?.cancellationReason === 'Cambio de Compañía' ? (
+                                            <><ArrowRightLeft size={13} /> Cargar Nueva Póliza</>
+                                        ) : 'Confirmar Anulación'}
                                     </button>
                                 </div>
                             </motion.div>
                         </motion.div>
                     )}
                 </AnimatePresence>
+
+                {/* Modal de Cambio de Compañía */}
+                <AnimatePresence>
+                    {isCambioCompaniaModalOpen && (
+                        <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            className="fixed inset-0 z-[2100] flex items-center justify-center bg-black/80 backdrop-blur-md p-4"
+                        >
+                            <motion.div
+                                initial={{ scale: 0.9, y: 20 }}
+                                animate={{ scale: 1, y: 0 }}
+                                exit={{ scale: 0.9, y: 20 }}
+                                className="w-full max-w-lg bg-zinc-900 border border-blue-500/30 p-6 rounded-[32px] shadow-2xl shadow-blue-500/10"
+                            >
+                                {/* Header */}
+                                <div className="flex items-center gap-3 mb-6">
+                                    <div className="p-3 bg-blue-500/20 rounded-2xl text-blue-400">
+                                        <ArrowRightLeft size={24} />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-xl font-black text-white uppercase tracking-tight">Cambio de Compañía</h3>
+                                        <p className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest">Subí la nueva póliza — la IA carga los datos</p>
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            setIsCambioCompaniaModalOpen(false);
+                                            setCambioCompaniaFile(null);
+                                            setCambioCompaniaResult(null);
+                                        }}
+                                        className="ml-auto p-2 hover:bg-white/10 rounded-xl text-zinc-400 hover:text-white transition-all"
+                                    >
+                                        <X size={18} />
+                                    </button>
+                                </div>
+
+                                {/* Zona de póliza anterior */}
+                                <div className="mb-4 px-4 py-3 bg-white/5 rounded-2xl border border-white/10">
+                                    <p className="text-[10px] font-black text-zinc-500 uppercase mb-1">Póliza que se anula</p>
+                                    <p className="text-sm font-black text-zinc-300">{editingPolicy?.clientName || '—'}</p>
+                                    <p className="text-[11px] text-zinc-500">{editingPolicy?.company || '—'} · #{editingPolicy?.policyNumber || '—'}</p>
+                                </div>
+
+                                {/* Upload zona */}
+                                {!cambioCompaniaResult && (
+                                    <div
+                                        onClick={() => !isCambioCompaniaProcessing && cambioCompaniaFileRef.current?.click()}
+                                        onDragOver={(e) => e.preventDefault()}
+                                        onDrop={(e) => {
+                                            e.preventDefault();
+                                            const f = e.dataTransfer.files[0];
+                                            if (f) handleCambioCompaniaFile(f);
+                                        }}
+                                        className={`relative flex flex-col items-center justify-center gap-3 border-2 border-dashed rounded-2xl p-8 cursor-pointer transition-all ${isCambioCompaniaProcessing ? 'border-blue-500/50 bg-blue-500/5' : 'border-white/20 hover:border-blue-500/50 hover:bg-blue-500/5'}`}
+                                    >
+                                        <input
+                                            ref={cambioCompaniaFileRef}
+                                            type="file"
+                                            className="hidden"
+                                            accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                            onChange={(e) => {
+                                                const f = e.target.files[0];
+                                                if (f) handleCambioCompaniaFile(f);
+                                            }}
+                                        />
+                                        {isCambioCompaniaProcessing ? (
+                                            <>
+                                                <Loader2 size={32} className="text-blue-400 animate-spin" />
+                                                <p className="text-sm font-black text-blue-300 uppercase">{cambioCompaniaProgress.message}</p>
+                                                <div className="w-full bg-white/10 rounded-full h-1.5 mt-1">
+                                                    <div
+                                                        className="bg-blue-500 h-1.5 rounded-full transition-all duration-500"
+                                                        style={{ width: `${cambioCompaniaProgress.percent}%` }}
+                                                    />
+                                                </div>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <div className="p-4 bg-blue-500/10 rounded-2xl text-blue-400">
+                                                    <Upload size={28} />
+                                                </div>
+                                                <div className="text-center">
+                                                    <p className="text-sm font-black text-white uppercase">Subí la nueva póliza</p>
+                                                    <p className="text-[11px] text-zinc-500 mt-1">PDF, PNG, JPG · La IA extrae todos los datos</p>
+                                                </div>
+                                                {cambioCompaniaProgress.message && !isCambioCompaniaProcessing && (
+                                                    <p className="text-[11px] text-red-400 font-bold">{cambioCompaniaProgress.message}</p>
+                                                )}
+                                            </>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* Resultado de la IA */}
+                                {cambioCompaniaResult && (
+                                    <div className="space-y-3">
+                                        <div className="flex items-center gap-2 text-emerald-400 mb-2">
+                                            <Sparkles size={16} />
+                                            <span className="text-[11px] font-black uppercase">Datos extraídos por IA</span>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {[
+                                                { label: 'Cliente', value: cambioCompaniaResult.clientName },
+                                                { label: 'DNI / CUIT', value: cambioCompaniaResult.dni },
+                                                { label: 'Compañía', value: cambioCompaniaResult.company },
+                                                { label: 'N° Póliza', value: cambioCompaniaResult.policyNumber },
+                                                { label: 'Ramo', value: cambioCompaniaResult.riskType },
+                                                { label: 'Vigencia desde', value: cambioCompaniaResult.startDate },
+                                                { label: 'Vigencia hasta', value: cambioCompaniaResult.endDate },
+                                                { label: 'Prima', value: cambioCompaniaResult.prima ? `${cambioCompaniaResult.currency || 'ARS'} ${cambioCompaniaResult.prima}` : null },
+                                            ].map(({ label, value }) => value ? (
+                                                <div key={label} className="bg-white/5 rounded-xl px-3 py-2 border border-white/10">
+                                                    <p className="text-[9px] font-black text-zinc-500 uppercase">{label}</p>
+                                                    <p className="text-[12px] font-bold text-white truncate">{value}</p>
+                                                </div>
+                                            ) : null)}
+                                        </div>
+                                        {/* Botón para volver a subir */}
+                                        <button
+                                            onClick={() => {
+                                                setCambioCompaniaResult(null);
+                                                setCambioCompaniaFile(null);
+                                                setCambioCompaniaProgress({ message: '', percent: 0 });
+                                            }}
+                                            className="w-full py-2 rounded-xl bg-white/5 text-zinc-400 text-[11px] font-black uppercase hover:bg-white/10 transition-all"
+                                        >
+                                            Subir otro archivo
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Botones de acción */}
+                                <div className="grid grid-cols-2 gap-3 mt-6">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setIsCambioCompaniaModalOpen(false);
+                                            setCambioCompaniaFile(null);
+                                            setCambioCompaniaResult(null);
+                                            // Reabrir el modal de anulación para que pueda elegir otro motivo
+                                            setIsCancellationModalOpen(true);
+                                        }}
+                                        className="py-3 px-4 rounded-2xl bg-white/5 text-zinc-400 text-[11px] font-black uppercase hover:bg-white/10 transition-all"
+                                    >
+                                        Volver
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={!cambioCompaniaResult || isCambioCompaniaConfirming}
+                                        onClick={handleConfirmCambioCompania}
+                                        className="py-3 px-4 rounded-2xl bg-blue-600 text-white text-[11px] font-black uppercase shadow-lg shadow-blue-600/20 hover:bg-blue-500 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2"
+                                    >
+                                        {isCambioCompaniaConfirming ? (
+                                            <><Loader2 size={13} className="animate-spin" /> Procesando...</>
+                                        ) : (
+                                            <><Check size={13} /> Confirmar Cambio</>
+                                        )}
+                                    </button>
+                                </div>
+                            </motion.div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
+                <UploadResultModal
+                    isOpen={uploadResult.isOpen}
+                    onClose={() => setUploadResult({ isOpen: false, status: '', message: '', details: [] })}
+                    status={uploadResult.status}
+                    message={uploadResult.message}
+                    details={uploadResult.details}
+                />
             </div>
         </div >
     );
